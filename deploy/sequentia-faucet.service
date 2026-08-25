@@ -10,7 +10,7 @@ WorkingDirectory=/root/sequentia/sequentia-faucet
 ExecStart=/usr/bin/node /root/sequentia/sequentia-faucet/server.js
 Environment=FAUCET_PORT=9960
 Environment=FAUCET_CLI=/root/Sequentia/src/sequentia-cli
-Environment=FAUCET_DATADIR=/root/seq-testnet/node-gw
+Environment=FAUCET_DATADIR=/root/seq-testnet/node000
 Environment=FAUCET_WALLET=treasury2026
 Environment=FAUCET_AMOUNT=50000
 Restart=on-failure

@@ -45,7 +45,7 @@ environment variable:
 | `FAUCET_PORT` | `9960` | port to listen on |
 | `FAUCET_HOST` | `127.0.0.1` | address to bind |
 | `FAUCET_CLI` | `/root/Sequentia/src/sequentia-cli` | node CLI used to send |
-| `FAUCET_DATADIR` | `/root/seq-testnet/node-gw` | node data directory |
+| `FAUCET_DATADIR` | `/root/seq-testnet/node000` | node data directory |
 | `FAUCET_WALLET` | `treasury2026` | wallet the coins come from |
 | `FAUCET_AMOUNT` | `50000` | tSEQ per request |
 | `FAUCET_COOLDOWN_MS` | `3600000` | per address and per IP, per asset |
