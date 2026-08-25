@@ -1,0 +1,9 @@
+{
+  "name": "sequentia-faucet",
+  "version": "1.0.0",
+  "description": "The Sequentia testnet faucet: a page and a send endpoint, backed by a funded node wallet.",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "license": "MIT",
+  "dependencies": { "express": "^4.19.2" }
+}
