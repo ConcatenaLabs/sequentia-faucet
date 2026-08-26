@@ -26,7 +26,15 @@ const ADDR_RE = /^(tb1|tsqb1)[ac-hj-np-z02-9]{20,180}$/
 
 // label -> amount. A fixed allowlist, so the asset can never be anything the
 // operator did not put here.
-const ASSETS = { USDX: '10', EURX: '10', GOLD: '10', SILVR: '10', OILX: '10' }
+//
+// USDX is not like the others. It is the settlement currency the platforms on
+// this testnet price things in, so what the faucet hands out is the ceiling on
+// what anyone can demonstrate: a fee schedule written for a six-figure raise
+// cannot be exercised with ten dollars, and an escrow funded with ten dollars
+// makes every percentage of it look absurd. It pays enough to fund a realistic
+// subscription. The others are commodity tokens, held to be seen and moved, and
+// ten of each is the right amount of those.
+const ASSETS = { USDX: '500000', EURX: '10', GOLD: '10', SILVR: '10', OILX: '10' }
 
 const seen = new Map()                                   // key -> last-served epoch ms
 const tooSoon = k => { const t = seen.get(k); return t && (Date.now() - t) < COOLDOWN_MS }
