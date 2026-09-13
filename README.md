@@ -1,8 +1,8 @@
 # Sequentia testnet faucet
 
 Free testnet coins: tSEQ and the sample assets (USDX, EURX, GOLD, SILVR, OILX),
-sent to any Sequentia address so they can be used from a full node, the desktop
-wallet, Ambra on Android or Chromium, or the web wallet.
+sent to any Sequentia address, so they can be used from a full node or from any
+Sequentia wallet.
 
 USDX is the settlement currency the platforms here price things in, so it is
 handed out in the amounts those platforms deal in rather than in samples: a raise
