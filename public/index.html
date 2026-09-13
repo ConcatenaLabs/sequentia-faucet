@@ -46,7 +46,7 @@
     <p class="hint">In the desktop wallet: <b>Receive &rarr; Create new address</b>. From a node: <code>sequentia-cli getnewaddress</code>. In the <a href="/wallet/" style="color:#f5b301;text-decoration:none">web wallet</a>: the receive address on the main screen.</p>
 
     <div class="assets" id="assets">
-      <button data-asset=""><b>tSEQ</b><small>Sequence token</small></button>
+      <button data-asset=""><b>tSEQ</b><small id="tseqAmount">Sequence token</small></button>
       <button data-asset="USDX"><b>USDX</b><small>test dollar</small></button>
       <button data-asset="EURX"><b>EURX</b><small>test euro</small></button>
       <button data-asset="GOLD"><b>GOLD</b><small>test gold</small></button>
@@ -67,6 +67,10 @@ const $=id=>document.getElementById(id);
 const addrInput=$('addr');
 addrInput.value=localStorage.getItem('faucetAddr')||'';
 addrInput.addEventListener('input',()=>localStorage.setItem('faucetAddr',addrInput.value.trim()));
+
+fetch('/faucet/amount').then(r=>r.json()).then(j=>{
+  if(j&&j.amount) $('tseqAmount').textContent=Number(j.amount).toLocaleString('en-US')+' per request';
+}).catch(()=>{});
 
 function msg(cls,html){const d=document.createElement('div');d.className='msg '+cls;d.innerHTML=html;$('log').prepend(d);return d;}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
