@@ -52,8 +52,26 @@ environment variable:
 | `FAUCET_CLI` | `/root/Sequentia/src/sequentia-cli` | node CLI used to send |
 | `FAUCET_DATADIR` | `/root/seq-testnet/node000` | node data directory |
 | `FAUCET_WALLET` | `treasury2026` | wallet the coins come from |
-| `FAUCET_AMOUNT` | `50000` | tSEQ per request |
+| `FAUCET_AMOUNT` | unset | pins the tSEQ amount per request; unset, it follows the treasury balance (below) |
+| `FAUCET_BALANCE_REFRESH_MS` | `60000` | how often the treasury balance is read |
 | `FAUCET_COOLDOWN_MS` | `3600000` | per address and per IP, per asset |
+
+## How much tSEQ a request pays
+
+The tSEQ amount follows what the funding wallet has left, so the faucet slows
+down as the treasury drains rather than running dry at full speed. The balance
+is read from the node once a minute; until the first reading succeeds the
+smallest amount applies.
+
+| treasury balance | tSEQ per request |
+| --- | --- |
+| 100,000,000 or more | 50,000 |
+| 10,000,000 to 100,000,000 | 20,000 |
+| 1,000,000 to 10,000,000 | 2,000 |
+| under 1,000,000 | 200 |
+
+`GET /faucet/amount` returns the amount in force, and the page shows it under
+the tSEQ button. The other assets are sent in fixed amounts.
 
 The funding wallet must hold a balance of every asset the faucet offers, and
 enough of each to pay its own fee, because Sequentia has no privileged fee asset

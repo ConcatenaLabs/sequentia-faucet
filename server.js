@@ -17,8 +17,21 @@ const HOST = process.env.FAUCET_HOST || '127.0.0.1'
 const CLI = process.env.FAUCET_CLI || '/root/Sequentia/src/sequentia-cli'
 const DATADIR = process.env.FAUCET_DATADIR || '/root/seq-testnet/node000'
 const WALLET = process.env.FAUCET_WALLET || 'treasury2026'
-const AMOUNT = process.env.FAUCET_AMOUNT || '50000'
+const FIXED_AMOUNT = process.env.FAUCET_AMOUNT || ''   // set to pin the tSEQ amount; unset, it follows the treasury
 const COOLDOWN_MS = Number(process.env.FAUCET_COOLDOWN_MS || 3600000)
+const BALANCE_REFRESH_MS = Number(process.env.FAUCET_BALANCE_REFRESH_MS || 60000)
+
+// The tSEQ amount follows what the treasury has left, so the faucet slows
+// down as it drains instead of running dry at full speed. Each row is the
+// smallest treasury balance at which that amount is handed out; the last row
+// is the floor. The treasury is a wallet, so its balance is one RPC away.
+const TIERS = [
+  [100_000_000, '50000'],
+  [10_000_000, '20000'],
+  [1_000_000, '2000'],
+  [0, '200'],
+]
+const tierFor = balance => TIERS.find(([floor]) => balance >= floor)[1]
 
 // bech32/blech32 data charset. Sequentia is transparent by default (tb1); the
 // blinded form (tsqb1) is opt-in and equally fundable.
@@ -45,6 +58,27 @@ setInterval(() => {
   for (const [k, t] of seen) if (t < cutoff) seen.delete(k)
 }, COOLDOWN_MS).unref()
 
+// Last known treasury balance and the amount it implies. Refreshed on a
+// timer rather than per request, so a burst of claims costs one RPC a
+// minute, not one each. Until the first reading succeeds the floor applies:
+// a faucet that cannot see its treasury should be stingy, not generous.
+const treasury = { balance: null, amount: TIERS[TIERS.length - 1][1], at: 0 }
+function refreshTreasury () {
+  if (FIXED_AMOUNT) return
+  const args = ['-datadir=' + DATADIR, '-rpcwallet=' + WALLET, 'getbalance', '*', '0', 'false', 'false', 'bitcoin']
+  execFile(CLI, args, { timeout: 15000 }, (err, stdout, stderr) => {
+    if (err) return console.error('treasury balance check failed: ' + String(stderr || err.message).trim().split('\n').pop())
+    const balance = Number(String(stdout).trim())
+    if (!Number.isFinite(balance)) return console.error('treasury balance unreadable: ' + String(stdout).trim())
+    const amount = tierFor(balance)
+    if (amount !== treasury.amount) console.log(`treasury ${balance} tSEQ: faucet amount ${treasury.amount} -> ${amount}`)
+    Object.assign(treasury, { balance, amount, at: Date.now() })
+  })
+}
+const currentAmount = () => FIXED_AMOUNT || treasury.amount
+refreshTreasury()
+setInterval(refreshTreasury, BALANCE_REFRESH_MS).unref()
+
 const app = express()
 app.disable('x-powered-by')
 // One trusted hop: the site front door proxies to us and forwards the original
@@ -52,6 +86,9 @@ app.disable('x-powered-by')
 app.set('trust proxy', 1)
 
 app.get('/healthz', (req, res) => res.json({ ok: true }))
+
+// What a tSEQ request pays right now, so the page can say so before the click.
+app.get('/amount', (req, res) => res.json({ amount: currentAmount(), asset: 'tSEQ' }))
 
 // execFile (no shell) plus a strict address regex means the user-supplied address
 // cannot inject anything; it is only ever one argv element. The optional asset is
@@ -63,7 +100,7 @@ app.post('/', express.json({ limit: '4kb' }), (req, res) => {
   if (asset && !Object.prototype.hasOwnProperty.call(ASSETS, asset))
     return res.status(400).json({ error: 'Unknown faucet asset.' })
   const unit = asset || 'tSEQ'
-  const amount = asset ? ASSETS[asset] : AMOUNT
+  const amount = asset ? ASSETS[asset] : currentAmount()
   const ip = String(req.ip || req.socket.remoteAddress || '').trim()
   if (tooSoon('a:' + unit + ':' + address) || tooSoon('i:' + unit + ':' + ip))
     return res.status(429).json({ error: 'Already funded recently; please wait before requesting again.' })
