@@ -2,7 +2,7 @@
 //! covenant output, one drip at a time.
 //!
 //! ```text
-//! faucet-drip key      --mnemonic-file F
+//! faucet-drip key      --mnemonic-file F | --new [--mnemonic-file F]
 //! faucet-drip instance --asset A --faucet-key K --treasury-key K --interval N --fee-cap N
 //!                      --tiers F1,M1,F2,M2,F3,M3,M4 --recovery-delay N (--genesis G | NODE)
 //! faucet-drip address  --instance I
@@ -107,7 +107,7 @@ impl Args {
         let (mut values, mut cli_args, mut flags) = (BTreeMap::new(), Vec::new(), Vec::new());
         while let Some(a) = it.next() {
             match a.as_str() {
-                "--dry-run" => flags.push(a),
+                "--dry-run" | "--new" => flags.push(a),
                 "--cli-arg" => cli_args.push(
                     it.next()
                         .ok_or_else(|| Fail::from("--cli-arg wants a value"))?,
@@ -983,8 +983,36 @@ fn cmd_key(a: &Args) -> Res<Value> {
     a.only(&["mnemonic-file"])?;
     // The contract key at m/8383h/1h/0h/0/0, the account every Sequentia chain
     // but the mainnet derives under.
-    let signer = Signer::from_mnemonic(&mnemonic(a)?, SimplicityNetwork::SequentiaTestnet);
-    Ok(json!({"faucet_key": hex(&signer.get_schnorr_public_key().serialize())}))
+    let key = |words: &str| {
+        let signer = Signer::from_mnemonic(words, SimplicityNetwork::SequentiaTestnet);
+        hex(&signer.get_schnorr_public_key().serialize())
+    };
+    if !a.flag("--new") {
+        return Ok(json!({"faucet_key": key(&mnemonic(a)?)}));
+    }
+    // A new mnemonic: twelve words from the operating system's randomness.
+    // It is printed once, or written once to a new file readable by its owner
+    // alone, and never to stderr, so no log of the tool's failures holds it.
+    let words = smplx_sdk::utils::random_mnemonic();
+    let faucet_key = key(&words);
+    match a.opt("mnemonic-file") {
+        None => Ok(json!({"mnemonic": words, "faucet_key": faucet_key})),
+        Some(path) => {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(|e| {
+                    Fail::from(format!(
+                        "{path}: {e}; a new mnemonic is never written over a file"
+                    ))
+                })?;
+            writeln!(f, "{words}").and_then(|()| f.sync_all())?;
+            Ok(json!({"mnemonic_file": path, "faucet_key": faucet_key}))
+        }
+    }
 }
 
 fn cmd_instance(a: &Args) -> Res<Value> {
