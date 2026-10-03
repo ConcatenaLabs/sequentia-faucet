@@ -21,6 +21,25 @@ const FIXED_AMOUNT = process.env.FAUCET_AMOUNT || ''   // set to pin the tSEQ am
 const COOLDOWN_MS = Number(process.env.FAUCET_COOLDOWN_MS || 3600000)
 const BALANCE_REFRESH_MS = Number(process.env.FAUCET_BALANCE_REFRESH_MS || 60000)
 
+// The drip covenant. With FAUCET_DRIP set, tSEQ is paid by the drip tool from
+// the faucet's covenant reserve instead of from the wallet: one drip per
+// interval, at most the tier the covenant holds. The instance file names the
+// covenant; the mnemonic file holds the faucet key, the only key the tool
+// signs with. Other assets are still sent from the wallet.
+const DRIP = process.env.FAUCET_DRIP || ''
+const DRIP_INSTANCE = process.env.FAUCET_DRIP_INSTANCE || ''
+const DRIP_MNEMONIC = process.env.FAUCET_DRIP_MNEMONIC || ''
+const DRIP_TEMPLATE = process.env.FAUCET_DRIP_TEMPLATE || ''   // unset: the template the tool was built with
+if (DRIP && !(DRIP_INSTANCE && DRIP_MNEMONIC)) {
+  console.error('FAUCET_DRIP is set: FAUCET_DRIP_INSTANCE and FAUCET_DRIP_MNEMONIC must name the instance and the faucet key')
+  process.exit(1)
+}
+// The drip tool reaches the node exactly as the faucet does.
+const dripArgs = command => [command, '--instance', DRIP_INSTANCE, '--cli', CLI, '--datadir', DATADIR]
+  .concat(DRIP_TEMPLATE ? ['--template', DRIP_TEMPLATE] : [])
+// The tool exits 3 when the reserve's interval has not passed.
+const DRIP_TOO_EARLY = 3
+
 // The tSEQ amount follows what the treasury has left, so the faucet slows
 // down as it drains instead of running dry at full speed. Each row is the
 // smallest treasury balance at which that amount is handed out; the last row
@@ -63,8 +82,31 @@ setInterval(() => {
 // minute, not one each. Until the first reading succeeds the floor applies:
 // a faucet that cannot see its treasury should be stingy, not generous.
 const treasury = { balance: null, amount: TIERS[TIERS.length - 1][1], at: 0 }
+
+// Atoms, as the drip tool counts them, in whole coins as the page shows them.
+function coins (atoms) {
+  const n = BigInt(atoms)
+  const frac = (n % 100000000n).toString().padStart(8, '0').replace(/0+$/, '')
+  return (n / 100000000n).toString() + (frac ? '.' + frac : '')
+}
+
+// With the drip covenant, what a request pays is the tier the covenant holds
+// for the reserve that is ready to drip.
+function refreshTier () {
+  execFile(DRIP, dripArgs('status'), { timeout: 30000 }, (err, stdout, stderr) => {
+    if (err) return console.error('drip status failed: ' + String(stderr || err.message).trim().split('\n').pop())
+    let s
+    try { s = JSON.parse(stdout) } catch (e) { return console.error('drip status unreadable') }
+    if (s.tier_now === null || s.tier_now === undefined) return
+    const amount = coins(s.tier_now)
+    if (amount !== treasury.amount) console.log(`covenant reserve: faucet amount ${treasury.amount} -> ${amount}`)
+    Object.assign(treasury, { amount, at: Date.now() })
+  })
+}
+
 function refreshTreasury () {
   if (FIXED_AMOUNT) return
+  if (DRIP) return refreshTier()
   const args = ['-datadir=' + DATADIR, '-rpcwallet=' + WALLET, 'getbalance', '*', '0', 'false', 'false', 'bitcoin']
   execFile(CLI, args, { timeout: 15000 }, (err, stdout, stderr) => {
     if (err) return console.error('treasury balance check failed: ' + String(stderr || err.message).trim().split('\n').pop())
@@ -93,6 +135,34 @@ app.get('/amount', (req, res) => res.json({ amount: currentAmount(), asset: 'tSE
 // execFile (no shell) plus a strict address regex means the user-supplied address
 // cannot inject anything; it is only ever one argv element. The optional asset is
 // checked against the allowlist above, so it is injection-safe for the same reason.
+// One drip at a time: the reserve is one coin, and a second spend of it while
+// the first is unconfirmed could only be refused.
+let dripping = false
+
+function payFromCovenant (req, res, address, ip) {
+  // The covenant polices explicit outputs only, so it pays a transparent
+  // address; paying a confidential one in the clear would override the
+  // recipient's choice.
+  if (!address.startsWith('tb1'))
+    return res.status(400).json({ error: 'tSEQ comes from the faucet\'s reserve, which pays transparent (tb1) addresses only.' })
+  if (dripping)
+    return res.status(429).json({ error: 'The faucet is paying another request; please try again in a moment.' })
+  dripping = true
+  const args = dripArgs('drip').concat(['--mnemonic-file', DRIP_MNEMONIC, '--to', address])
+  execFile(DRIP, args, { timeout: 60000 }, (err, stdout, stderr) => {
+    dripping = false
+    const why = String(stderr || (err && err.message) || '').trim().split('\n').pop()
+    if (err && err.code === DRIP_TOO_EARLY)
+      return res.status(429).json({ error: 'The faucet pays tSEQ from its reserve once per interval; please try again in a few minutes.' })
+    if (err) return res.status(502).json({ error: why || 'faucet drip failed' })
+    let r
+    try { r = JSON.parse(stdout) } catch (e) { return res.status(502).json({ error: 'faucet drip answer unreadable' }) }
+    seen.set('a:tSEQ:' + address, Date.now()); seen.set('i:tSEQ:' + ip, Date.now())
+    res.json({ txid: r.txid, amount: coins(r.amount), asset: 'tSEQ' })
+    refreshTier()
+  })
+}
+
 app.post('/', express.json({ limit: '4kb' }), (req, res) => {
   const address = String((req.body && req.body.address) || '').trim()
   if (!ADDR_RE.test(address)) return res.status(400).json({ error: 'Enter a valid Sequentia address.' })
@@ -104,6 +174,7 @@ app.post('/', express.json({ limit: '4kb' }), (req, res) => {
   const ip = String(req.ip || req.socket.remoteAddress || '').trim()
   if (tooSoon('a:' + unit + ':' + address) || tooSoon('i:' + unit + ':' + ip))
     return res.status(429).json({ error: 'Already funded recently; please wait before requesting again.' })
+  if (!asset && DRIP) return payFromCovenant(req, res, address, ip)
 
   // The open fee market means no asset is the default fee asset; the node requires
   // the fee asset to be NAMED. Pay it in the asset being sent (the fee-model default

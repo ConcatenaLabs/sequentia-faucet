@@ -12,6 +12,11 @@ Environment=FAUCET_PORT=9960
 Environment=FAUCET_CLI=/root/Sequentia/src/sequentia-cli
 Environment=FAUCET_DATADIR=/root/seq-testnet/node000
 Environment=FAUCET_WALLET=treasury2026
+# To pay tSEQ from the drip covenant (README), set these three; the mnemonic
+# file is the faucet key, readable by this service's user alone.
+#Environment=FAUCET_DRIP=/root/sequentia/sequentia-faucet/drip/target/release/faucet-drip
+#Environment=FAUCET_DRIP_INSTANCE=/root/sequentia/faucet-drip/instance.json
+#Environment=FAUCET_DRIP_MNEMONIC=/root/sequentia/faucet-drip/faucet.mnemonic
 Restart=on-failure
 RestartSec=5
 
