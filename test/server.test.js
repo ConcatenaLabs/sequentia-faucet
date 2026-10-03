@@ -107,6 +107,35 @@ test('the drip covenant pays tSEQ, once per interval, to transparent addresses',
   assert.match(usdx.body.txid, /assetlabel=USDX/)
 })
 
+test('a drip never overlaps the status check: the node runs one scan at a time', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'faucet-server-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const state = path.join(dir, 'state')
+  // A status check every 20 ms, each scan taking 150 ms: a check is nearly
+  // always running, or due, when a request arrives.
+  const s = await start(t, {
+    FAUCET_DRIP: path.join(__dirname, 'fake-drip.js'),
+    FAUCET_DRIP_INSTANCE: path.join(dir, 'instance.json'),
+    FAUCET_DRIP_MNEMONIC: path.join(dir, 'faucet.mnemonic'),
+    FAKE_DRIP_STATE: state,
+    FAKE_DRIP_SCAN_MS: '150',
+    FAKE_DRIP_EVERY_TIME: '1',
+    FAUCET_BALANCE_REFRESH_MS: '20',
+    FAUCET_COOLDOWN_MS: '1'
+  })
+  for (let i = 0; i < 50 && (await s.get('/amount')).amount !== '50000'; i++) await new Promise(r => setTimeout(r, 100))
+  for (let i = 0; i < 6; i++) {
+    await new Promise(r => setTimeout(r, 10 + 37 * i))
+    const paid = await s.post({ address: TB1(10 + i) })
+    assert.equal(paid.status, 200, 'drip ' + i + ': ' + JSON.stringify(paid.body))
+  }
+  // Status checks kept running between the drips, and no scan met another.
+  const calls = fs.readFileSync(state + '.log', 'utf8').trim().split('\n').map(l => JSON.parse(l)[0])
+  assert.equal(calls.filter(c => c === 'drip').length, 6)
+  assert.ok(calls.filter(c => c === 'status').length > 6, 'the status checks ran: ' + calls.join(' '))
+  assert.equal(fs.existsSync(state + '.refused'), false, 'refused scans: ' + (fs.existsSync(state + '.refused') && fs.readFileSync(state + '.refused', 'utf8')))
+})
+
 test('the drip covenant needs its instance and its key', async () => {
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
     env: { ...base(), FAUCET_PORT: String(await freePort()), FAUCET_DRIP: '/bin/true' },

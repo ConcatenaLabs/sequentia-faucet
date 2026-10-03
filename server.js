@@ -90,17 +90,31 @@ function coins (atoms) {
   return (n / 100000000n).toString() + (frac ? '.' + frac : '')
 }
 
+// The drip tool's status and its drip both find the reserve with the node's
+// scantxoutset, which runs one scan at a time and refuses a second while the
+// first is running. So the two never overlap: a status check is skipped while
+// a drip is paying, and a drip waits for a status check already running.
+// One drip at a time, too: the reserve is one coin, and a second spend of it
+// while the first is unconfirmed could only be refused.
+let dripping = false
+let checking = null   // the status check in flight, as a promise that settles when it ends
+
 // With the drip covenant, what a request pays is the tier the covenant holds
 // for the reserve that is ready to drip.
 function refreshTier () {
-  execFile(DRIP, dripArgs('status'), { timeout: 30000 }, (err, stdout, stderr) => {
-    if (err) return console.error('drip status failed: ' + String(stderr || err.message).trim().split('\n').pop())
-    let s
-    try { s = JSON.parse(stdout) } catch (e) { return console.error('drip status unreadable') }
-    if (s.tier_now === null || s.tier_now === undefined) return
-    const amount = coins(s.tier_now)
-    if (amount !== treasury.amount) console.log(`covenant reserve: faucet amount ${treasury.amount} -> ${amount}`)
-    Object.assign(treasury, { amount, at: Date.now() })
+  if (dripping || checking) return
+  checking = new Promise(resolve => {
+    execFile(DRIP, dripArgs('status'), { timeout: 30000 }, (err, stdout, stderr) => {
+      checking = null
+      resolve()
+      if (err) return console.error('drip status failed: ' + String(stderr || err.message).trim().split('\n').pop())
+      let s
+      try { s = JSON.parse(stdout) } catch (e) { return console.error('drip status unreadable') }
+      if (s.tier_now === null || s.tier_now === undefined) return
+      const amount = coins(s.tier_now)
+      if (amount !== treasury.amount) console.log(`covenant reserve: faucet amount ${treasury.amount} -> ${amount}`)
+      Object.assign(treasury, { amount, at: Date.now() })
+    })
   })
 }
 
@@ -135,10 +149,6 @@ app.get('/amount', (req, res) => res.json({ amount: currentAmount(), asset: 'tSE
 // execFile (no shell) plus a strict address regex means the user-supplied address
 // cannot inject anything; it is only ever one argv element. The optional asset is
 // checked against the allowlist above, so it is injection-safe for the same reason.
-// One drip at a time: the reserve is one coin, and a second spend of it while
-// the first is unconfirmed could only be refused.
-let dripping = false
-
 function payFromCovenant (req, res, address, ip) {
   // The covenant polices explicit outputs only, so it pays a transparent
   // address; paying a confidential one in the clear would override the
@@ -149,7 +159,7 @@ function payFromCovenant (req, res, address, ip) {
     return res.status(429).json({ error: 'The faucet is paying another request; please try again in a moment.' })
   dripping = true
   const args = dripArgs('drip').concat(['--mnemonic-file', DRIP_MNEMONIC, '--to', address])
-  execFile(DRIP, args, { timeout: 60000 }, (err, stdout, stderr) => {
+  Promise.resolve(checking).then(() => execFile(DRIP, args, { timeout: 60000 }, (err, stdout, stderr) => {
     dripping = false
     const why = String(stderr || (err && err.message) || '').trim().split('\n').pop()
     if (err && err.code === DRIP_TOO_EARLY)
@@ -160,7 +170,7 @@ function payFromCovenant (req, res, address, ip) {
     seen.set('a:tSEQ:' + address, Date.now()); seen.set('i:tSEQ:' + ip, Date.now())
     res.json({ txid: r.txid, amount: coins(r.amount), asset: 'tSEQ' })
     refreshTier()
-  })
+  }))
 }
 
 app.post('/', express.json({ limit: '4kb' }), (req, res) => {

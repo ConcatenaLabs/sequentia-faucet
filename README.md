@@ -119,6 +119,7 @@ drip/target/release/faucet-drip <command> ...
 | command | does |
 | --- | --- |
 | `key --mnemonic-file F` | prints the contract key a mnemonic signs with, to name as a faucet or treasury key |
+| `key --new [--mnemonic-file F]` | makes a new twelve-word mnemonic and prints its contract key; the mnemonic is printed once on stdout, or with `--mnemonic-file` written to `F`, a new file readable by its owner alone, and not printed |
 | `instance --asset A --faucet-key K --treasury-key K --interval N --fee-cap N --tiers F1,M1,F2,M2,F3,M3,M4 --recovery-delay N --cli C --datadir D` | prints the instance: the asset as an RPC prints it, the interval and recovery delay in units of 512 seconds, the fee cap and tiers in atoms; the chain is read from the node (or `--genesis G`) |
 | `address --instance I` | prints the covenant's address on each chain, and each leaf |
 | `status --instance I --cli C --datadir D` | lists the reserves at the address, each with its tier and the seconds until it can drip |
@@ -137,7 +138,14 @@ floor, its mempool minimum and its estimate, whichever is highest) unless
 `--fee-rate` gives one, in reference units per 1,000 vbytes.
 
 The instance file holds public keys and amounts only. The mnemonic file is the
-faucet key and stays on the server, readable by the faucet's user alone.
+faucet key and stays on the server, readable by the faucet's user alone: make it
+there with `key --new --mnemonic-file F`, so the words never cross a terminal.
+Make the treasury's mnemonic away from the server and keep it offline.
+
+`status` and `drip` both find the reserve with the node's `scantxoutset`, which
+runs one scan at a time. The faucet therefore never runs them together: its
+periodic status check is skipped while a drip is paying, and a request that
+arrives during a status check waits for it to end.
 
 ## Testing
 
@@ -147,8 +155,10 @@ npm test
 ```
 
 runs the request path with `FAUCET_CLI` pointed at `echo`, and the drip
-covenant's path with a stand-in for the tool, so no coins move. With a built
-node and tool it also runs the tool against a local `elementsregtest` chain:
+covenant's path with a stand-in for the tool, so no coins move; the stand-in
+refuses a second scan while one is running, as the node does. With a built tool
+it also checks `key --new`, and with a built node it runs the tool against a
+local `elementsregtest` chain:
 
 ```
 cargo build --manifest-path drip/Cargo.toml
