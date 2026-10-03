@@ -1,0 +1,19 @@
+[package]
+name = "faucet-drip"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Builds, signs and broadcasts a drip from the faucet's covenant reserve."
+
+[dependencies]
+# The framework: programs, contract trees, the contract key, the budget rule.
+smplx-sdk = { git = "https://github.com/ConcatenaLabs/smplx", rev = "57dd57f686dd21e47ec8b7af7b6e19d33bef7829" }
+# The pinned compiler, the descriptor reader and the faucet_drip template.
+sequentia-contracts = { git = "https://github.com/ConcatenaLabs/sequentia-contracts", rev = "11a719c590435dbb684e9205bb3db9a6db13098c" }
+serde_json = "1"
+
+# Sequentia's transaction encoding, as smplx declares it: a project depending on
+# smplx declares the same patch, naming the same SWK commit (smplx's SEQUENTIA.md).
+[patch.crates-io]
+elements = { git = "https://github.com/ConcatenaLabs/SWK", rev = "87a9f5e7f98356a2c00712884019079566aacfec" }

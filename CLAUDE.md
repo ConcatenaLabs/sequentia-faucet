@@ -4,9 +4,11 @@ One service, one page, one endpoint. Keep it that way.
 
 ## What this repo is
 
-The testnet faucet: `server.js` sends coins from a funded node wallet, and
-`public/index.html` is the page people use to ask for them. No build step, no
-database, no state that survives a restart.
+The testnet faucet: `server.js` sends coins from a funded node wallet, or tSEQ
+from a drip covenant through the tool in `drip/`, and `public/index.html` is the
+page people use to ask for them. The page and server have no build step, no
+database, and no state that survives a restart; the drip tool is a Rust command
+built with cargo.
 
 It lived inside `sequentia-explorer` until 2026-08-24, embedded in that repo's
 `serve-public.js`. A faucet is not an explorer. Sharing a process with the site
@@ -48,12 +50,27 @@ per-IP limit into a single global one.
 
 ```
 npm install
-FAUCET_CLI=/bin/echo node server.js
+npm test
 ```
 
-Pointing `FAUCET_CLI` at `echo` exercises the whole request path, including
-validation and rate limiting, without moving coins. Check that a bad address is
-rejected with 400, an unknown asset with 400, and a repeat request with 429.
+The tests point `FAUCET_CLI` at `echo`, which exercises the whole request path,
+including validation and rate limiting, without moving coins: a bad address is
+rejected with 400, an unknown asset with 400, and a repeat request with 429. The
+drip covenant's path runs against `test/fake-drip.js`, which answers as the
+drip tool does. A change to `drip/` also runs the tool against a local chain
+(`FAUCET_REGTEST_BIN` and `FAUCET_DRIP`, see the README); the covenant itself is
+proven in `sequentia-contracts` (`harness/tests/f1_faucet_drip.py`).
+
+## The drip covenant
+
+`drip/` pins the `smplx` and `sequentia-contracts` revisions it builds with in
+`drip/Cargo.toml`, and the template it drips from by its hash in
+`drip/src/main.rs`. A template is immutable: a changed covenant is a new
+template, so moving to one is a new instance and a new address, and the
+reserve moves by a drip or a recovery, never by editing this tool to accept
+another hash. The tool signs with the faucet key only, never a wallet key, and
+the server passes it every value as one argv element, as it does for
+`sequentia-cli`.
 
 ## Deploy
 
