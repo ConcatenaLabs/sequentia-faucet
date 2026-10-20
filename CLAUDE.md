@@ -5,8 +5,9 @@ One service, one page, one endpoint. Keep it that way.
 ## What this repo is
 
 The testnet faucet: `server.js` sends coins from a funded node wallet, or tSEQ
-from a drip covenant through the tool in `drip/`, and `public/index.html` is the
-page people use to ask for them. The page and server have no build step, no
+from a drip covenant through the tool in `drip/`, or pays a receive request as
+a leaf from its own Arca wallet through `leaves.js`, and `public/index.html` is
+the page people use to ask for them. The page and server have no build step, no
 database, and no state that survives a restart; the drip tool is a Rust command
 built with cargo.
 
@@ -71,6 +72,17 @@ reserve moves by a drip or a recovery, never by editing this tool to accept
 another hash. The tool signs with the faucet key only, never a wallet key, and
 the server passes it every value as one argv element, as it does for
 `sequentia-cli`.
+
+## Leaf payouts
+
+`leaves.js` pays receive requests from the faucet's own Arca wallet, through
+the `arca` command line, by the same tiers, amounts and limits as on-chain
+payouts: a leaf never has rules of its own, and tSEQ is one asset among the
+others there too. The leaf wallet is never the drip covenant's reserve nor the
+treasury. Arca is not named on any public page: the page offers addresses
+only, and a leaf is paid only to a wallet that sends a receive request. Every
+`arca` command runs through `execFile`, the request as one argv element, one
+command at a time, since the wallet is one store.
 
 ## Deploy
 
