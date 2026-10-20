@@ -36,6 +36,35 @@ Addresses may be transparent (`tb1`, the default on Sequentia) or blinded
 covenant (below), which goes to transparent addresses only: a `tsqb1` address
 gets a `400`, and a request made before the reserve's next interval a `429`.
 
+### Asking for a leaf
+
+A wallet on an Arca operator can be funded without any coin on the chain: in
+place of `address` it sends the receive request it hands out (the `arca:…`
+text of `arca receive`, with its lapse), and the faucet pays the asset into it
+as a leaf, out of round, from a wallet of its own on the operator (see "Paying
+leaves" below):
+
+```json
+{ "request": "arca:7b22617263615f72657175657374223a31…", "asset": "USDX" }
+```
+
+```json
+{ "amount": "500000", "asset": "USDX", "leaf": { "asset": "<asset id>", "atoms": "50000000000000", "owner": "<the request's key>" } }
+```
+
+The wallet's next `arca sync` reads the coin from its mailbox and holds it.
+The amount is the one an on-chain request of the asset pays now (for tSEQ the
+tier in force), or the request's own value when it asks for less. The same
+limits apply: one payout per wallet (the request's mailbox key, which every
+request of a wallet carries) and per IP, per asset, in the cooldown, and an
+IP's leaf and on-chain payouts of one asset count together. Refused with a
+`400`: a request that has lapsed or names no lapse, one for another operator
+or another chain, an asset the operator does not serve or the faucet does not
+pay as a leaf, a request naming another asset than the one asked, and anything
+that is not a receive request. A `503` says the faucet has no leaves of the
+asset to pay now, and a faucet without a leaf wallet answers every receive
+request with a `400`. The page itself offers only addresses.
+
 ## Running it
 
 ```
@@ -61,6 +90,13 @@ environment variable:
 | `FAUCET_DRIP_INSTANCE` | unset | with `FAUCET_DRIP`: the covenant's instance file |
 | `FAUCET_DRIP_MNEMONIC` | unset | with `FAUCET_DRIP`: a file holding the mnemonic of the faucet key |
 | `FAUCET_DRIP_TEMPLATE` | unset | with `FAUCET_DRIP`: the template directory; unset, the one the tool was built with |
+| `FAUCET_LEAF_ARCA` | unset | the `arca` command line; set, receive requests are paid as leaves (below) |
+| `FAUCET_LEAF_DATADIR` | unset | with `FAUCET_LEAF_ARCA`: the leaf wallet's directory |
+| `FAUCET_LEAF_OPERATOR` | unset | with `FAUCET_LEAF_ARCA`: the operator key the leaf wallet must be on; a request for another operator is refused |
+| `FAUCET_LEAF_ASSETS` | unset | with `FAUCET_LEAF_ARCA`: the assets paid as leaves, `label=asset id,…` (`tSEQ=<id>,USDX=<id>`) |
+| `FAUCET_LEAF_LOW` | `5` | board more of an asset when the leaves hold fewer payouts of it than this (`0`: never board) |
+| `FAUCET_LEAF_BOARD` | `20` | how many payouts of an asset one board brings in |
+| `FAUCET_LEAF_SYNC_MIN_MS`, `FAUCET_LEAF_SYNC_MAX_MS` | `60000`, `3600000` | the bounds on the time between two syncs of the leaf wallet |
 
 ## How much tSEQ a request pays
 
@@ -147,6 +183,46 @@ runs one scan at a time. The faucet therefore never runs them together: its
 periodic status check is skipped while a drip is paying, and a request that
 arrives during a status check waits for it to end.
 
+## Paying leaves
+
+With `FAUCET_LEAF_ARCA` set, the faucet pays receive requests from a wallet
+of its own on an Arca operator: the `arca` command line
+([arca](https://github.com/ConcatenaLabs/arca), `bark-cli`) on the directory
+`FAUCET_LEAF_DATADIR`. That wallet is the faucet's alone, never the drip
+covenant's reserve and never the treasury: it is funded by boarding its own
+on-chain coins, which are sent to it like to any address (`arca address`).
+
+- **A payout** is `arca send REQUEST --amount N --asset ID`, one at a time.
+  Before it, the faucet checks the request's operator (`FAUCET_LEAF_OPERATOR`),
+  its chain, the asset and its lapse against the chain's median time at the
+  wallet's last sync, with a minute's margin; the wallet then checks the lapse,
+  the operator and the asset again against the chain now before it signs.
+- **Syncs** follow the library's schedule: after each `arca sync` the faucet
+  runs the next when `schedule.next_sync_at` says, within
+  `FAUCET_LEAF_SYNC_MIN_MS` and `FAUCET_LEAF_SYNC_MAX_MS`. A sync reads the
+  wallet's mailbox, moves its boards on and refreshes its coins in their free
+  window before their exit deadline, so the wallet's coins stay alive by
+  themselves.
+- **Boards**: after each sync, an asset whose leaves hold fewer than
+  `FAUCET_LEAF_LOW` payouts, and none boarding, is boarded with
+  `FAUCET_LEAF_BOARD` payouts from the wallet's on-chain coins, at most nine
+  tenths of them (the rest pays the board's fee, in the asset boarded). When
+  the on-chain coins cannot cover a payout the log says so: fund the wallet's
+  address.
+
+Setting it up on the operator's chain:
+
+```
+arca --datadir /var/lib/sequentia-faucet/leaves create --server https://<host>/arca \
+  --node-url http://127.0.0.1:<rpc port> --node-cookie <cookie file>
+arca --datadir /var/lib/sequentia-faucet/leaves address    # fund it with each asset to pay as leaves
+```
+
+then set `FAUCET_LEAF_ARCA`, `FAUCET_LEAF_DATADIR`, `FAUCET_LEAF_OPERATOR` (the
+key `create` printed and pinned) and `FAUCET_LEAF_ASSETS`, and restart the
+faucet. The node must run with `-txindex` and `-validateanchor`, as for any
+Arca wallet.
+
 ## Testing
 
 ```
@@ -154,8 +230,9 @@ npm install
 npm test
 ```
 
-runs the request path with `FAUCET_CLI` pointed at `echo`, and the drip
-covenant's path with a stand-in for the tool, so no coins move; the stand-in
+runs the request path with `FAUCET_CLI` pointed at `echo`, the drip
+covenant's path with a stand-in for the tool, and the leaf path with a
+stand-in for `arca` (`test/fake-arca.js`), so no coins move; the stand-in
 refuses a second scan while one is running, as the node does. With a built tool
 it also checks `key --new`, and with a built node it runs the tool against a
 local `elementsregtest` chain:

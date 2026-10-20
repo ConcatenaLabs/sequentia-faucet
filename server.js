@@ -40,6 +40,23 @@ const dripArgs = command => [command, '--instance', DRIP_INSTANCE, '--cli', CLI,
 // The tool exits 3 when the reserve's interval has not passed.
 const DRIP_TOO_EARLY = 3
 
+// Leaf payouts. With FAUCET_LEAF_ARCA set, a request may carry a receive
+// request (`request`) in place of an address, and is paid into it out of
+// round from the faucet's own leaf wallet (leaves.js): the `arca` command
+// line on FAUCET_LEAF_DATADIR, a wallet of operator FAUCET_LEAF_OPERATOR.
+// FAUCET_LEAF_ASSETS maps each label the faucet pays this way to its asset
+// id ("tSEQ=<id>,USDX=<id>"). The amounts, the tiers and the limits are the
+// on-chain payouts'.
+const LEAF_ARCA = process.env.FAUCET_LEAF_ARCA || ''
+const LEAF_DATADIR = process.env.FAUCET_LEAF_DATADIR || ''
+const LEAF_OPERATOR = process.env.FAUCET_LEAF_OPERATOR || ''
+const LEAF_ASSETS = new Map(String(process.env.FAUCET_LEAF_ASSETS || '').split(',').filter(Boolean).map(p => p.trim().split('=')))
+if (LEAF_ARCA && !(LEAF_DATADIR && /^[0-9a-f]{64}$/.test(LEAF_OPERATOR) && LEAF_ASSETS.size &&
+  [...LEAF_ASSETS].every(([l, id]) => /^[0-9a-f]{64}$/.test(id || '') && l))) {
+  console.error('FAUCET_LEAF_ARCA is set: FAUCET_LEAF_DATADIR, FAUCET_LEAF_OPERATOR (the operator key) and FAUCET_LEAF_ASSETS (label=asset id,…) must be set too')
+  process.exit(1)
+}
+
 // The tSEQ amount follows what the treasury has left, so the faucet slows
 // down as it drains instead of running dry at full speed. Each row is the
 // smallest treasury balance at which that amount is handed out; the last row
@@ -135,6 +152,26 @@ const currentAmount = () => FIXED_AMOUNT || treasury.amount
 refreshTreasury()
 setInterval(refreshTreasury, BALANCE_REFRESH_MS).unref()
 
+for (const label of LEAF_ASSETS.keys()) {
+  if (label !== 'tSEQ' && !Object.prototype.hasOwnProperty.call(ASSETS, label)) {
+    console.error(`FAUCET_LEAF_ASSETS: ${label} is not an asset the faucet pays`)
+    process.exit(1)
+  }
+}
+const leaves = LEAF_ARCA ? require('./leaves').init({
+  arca: LEAF_ARCA,
+  datadir: LEAF_DATADIR,
+  operator: LEAF_OPERATOR,
+  assets: LEAF_ASSETS,
+  // What a leaf of each asset pays: what the same asset pays on-chain now.
+  amountFor: label => (label === 'tSEQ' ? currentAmount() : ASSETS[label]),
+  syncMinMs: Number(process.env.FAUCET_LEAF_SYNC_MIN_MS || 60000),
+  syncMaxMs: Number(process.env.FAUCET_LEAF_SYNC_MAX_MS || 3600000),
+  low: Number(process.env.FAUCET_LEAF_LOW ?? 5),
+  board: Number(process.env.FAUCET_LEAF_BOARD ?? 20)
+}) : null
+if (leaves) leaves.start()
+
 const app = express()
 app.disable('x-powered-by')
 // One trusted hop: the site front door proxies to us and forwards the original
@@ -173,7 +210,32 @@ function payFromCovenant (req, res, address, ip) {
   }))
 }
 
-app.post('/', express.json({ limit: '4kb' }), (req, res) => {
+// A receive request, paid as a leaf. Asked for only by a wallet that hands
+// one out; the page offers none.
+function payLeaf (req, res, ip) {
+  const text = String(req.body.request || '')
+  if (req.body.address !== undefined) return res.status(400).json({ error: 'Send an address or a receive request, not both.' })
+  if (!leaves) return res.status(400).json({ error: 'This faucet does not pay receive requests.' })
+  const asset = String(req.body.asset || '').trim()
+  if (asset && !Object.prototype.hasOwnProperty.call(ASSETS, asset)) return res.status(400).json({ error: 'Unknown faucet asset.' })
+  const unit = asset || 'tSEQ'
+  let r
+  try { r = leaves.decode(text) } catch (e) { return res.status(e.status || 400).json({ error: e.message }) }
+  // The same limits as on-chain: per wallet (its mailbox key, the one key all
+  // of a wallet's requests share) and per IP, per asset, the IP's shared with
+  // its on-chain requests.
+  if (tooSoon('m:' + unit + ':' + r.mailbox) || tooSoon('i:' + unit + ':' + ip))
+    return res.status(429).json({ error: 'Already funded recently; please wait before requesting again.' })
+  let paying
+  try { paying = leaves.pay(text, r, unit) } catch (e) { return res.status(e.status || 400).json({ error: e.message }) }
+  paying.then(p => {
+    seen.set('m:' + unit + ':' + r.mailbox, Date.now()); seen.set('i:' + unit + ':' + ip, Date.now())
+    res.json({ amount: p.amount, asset: unit, leaf: { asset: p.asset_id, atoms: p.atoms, owner: r.owner } })
+  }, e => res.status(e.status || 502).json({ error: e.message }))
+}
+
+app.post('/', express.json({ limit: '8kb' }), (req, res) => {
+  if (req.body && req.body.request !== undefined) return payLeaf(req, res, String(req.ip || req.socket.remoteAddress || '').trim())
   const address = String((req.body && req.body.address) || '').trim()
   if (!ADDR_RE.test(address)) return res.status(400).json({ error: 'Enter a valid Sequentia address.' })
   const asset = String((req.body && req.body.asset) || '').trim()   // '' = native tSEQ
