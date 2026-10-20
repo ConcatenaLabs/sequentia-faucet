@@ -21,12 +21,13 @@ const Z = 'ab'.repeat(32)
 const MEDIAN = 1800000000
 const TB1 = 'tb1q' + 'q'.repeat(38)
 
-// A receive request as `arca receive` hands it out, its fields changed by `edit`.
+// A receive request as `arca receive` hands it out, its fields changed by `edit`
+// (an older wallet's names itself with `arca_request: 1` in place of `kind`).
 let n = 0
 function request (edit = {}) {
   n++
   const k = String(n).padStart(64, '0')
-  const v = { arca_request: 1, genesis_hash: GENESIS, operator: OPERATOR, owner: k, owner_nonce: k, mailbox: 'aa'.repeat(31) + String(n % 100).padStart(2, '0'), exit_delay_units: 2, until: MEDIAN + 27 * 86400, ...edit }
+  const v = { kind: 'request', genesis_hash: GENESIS, operator: OPERATOR, owner: k, owner_nonce: k, mailbox: 'aa'.repeat(31) + String(n % 100).padStart(2, '0'), exit_delay_units: 2, until: MEDIAN + 27 * 86400, ...edit }
   for (const key of Object.keys(v)) if (v[key] === undefined) delete v[key]
   return 'arca:' + Buffer.from(JSON.stringify(v)).toString('hex')
 }
@@ -108,6 +109,9 @@ test('a receive request is paid as a leaf at the tier and amounts of on-chain pa
   const tiny = await s.post({ request: request({ value: '10' }) }, '10.0.0.3')
   assert.equal(tiny.status, 400)
   assert.match(tiny.body.error, /below the operator's smallest leaf/)
+  // A request an older wallet made, named by `arca_request`, is paid as well.
+  const older = await s.post({ request: request({ kind: undefined, arca_request: 1 }) }, '10.0.0.4')
+  assert.equal(older.status, 200, JSON.stringify(older.body))
 })
 
 test('the same limits as on-chain payouts: per wallet and per IP, the IP shared with on-chain requests', async t => {
@@ -142,7 +146,8 @@ test('refused: a lapsed request, an unserved asset, another operator or chain, a
     [{ request: request({ operator: 'ee'.repeat(32) }) }, 400, /is for operator eeee.*through operator bc81bdb7.* only/],
     [{ request: request({ genesis_hash: '00'.repeat(32) }) }, 400, /for another chain/],
     [{ request: request(), address: TB1 }, 400, /not both/],
-    [{ request: 'arca:' + Buffer.from('{"arca_request":1}').toString('hex') }, 400, /has no operator/],
+    [{ request: 'arca:' + Buffer.from('{"kind":"request"}').toString('hex') }, 400, /has no operator/],
+    [{ request: request({ kind: 'swap-offer' }) }, 400, /^Not a receive request\.$/],
     [{ request: 'hello' }, 400, /no prefix/]
   ]
   for (const [body, status, why] of cases) {

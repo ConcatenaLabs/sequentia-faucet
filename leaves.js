@@ -31,7 +31,8 @@ function toCoins (atoms) {
 const refuse = (status, error) => Object.assign(new Error(error), { status })
 
 // A receive request as a wallet hands it out: a prefix word, a colon, and the
-// hex of its JSON, which names `arca_request`.
+// hex of its JSON, which says it is one (`kind: "request"`, or, made by an
+// older wallet, `arca_request: 1`).
 function decode (text) {
   const s = String(text || '').trim()
   if (s.length > 4096) throw refuse(400, 'The receive request is too long.')
@@ -41,7 +42,7 @@ function decode (text) {
   if (!/^([0-9a-f]{2})+$/.test(h)) throw refuse(400, 'Not a receive request: it is not hex after its prefix.')
   let v
   try { v = JSON.parse(Buffer.from(h, 'hex').toString('utf8')) } catch (e) { throw refuse(400, 'Not a receive request: it holds no JSON.') }
-  if (!v || typeof v !== 'object' || v.arca_request !== 1) throw refuse(400, 'Not a receive request.')
+  if (!v || typeof v !== 'object' || (v.kind !== 'request' && v.arca_request !== 1)) throw refuse(400, 'Not a receive request.')
   for (const k of ['operator', 'genesis_hash', 'owner', 'mailbox']) {
     if (!HEX64.test(v[k] || '')) throw refuse(400, `The receive request has no ${k}.`)
   }
