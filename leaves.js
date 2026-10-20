@@ -90,28 +90,39 @@ function init (cfg) {
   // Keeps each asset's leaves at `low` payouts or more, boarding `board`
   // payouts from the wallet's on-chain coins when it has them. A board waits
   // for its transaction to be final before its coin can pay, so an asset
-  // with a board pending is left alone.
+  // with a board pending is left alone. Returns true while an asset is low:
+  // a board is pending, or one is waiting for on-chain coins. The wallet's
+  // own schedule says nothing of either, so the faucet looks again soon
+  // rather than at its longest interval.
+  const short = new Set()
   async function topUp () {
-    if (!low || !board) return
+    if (!low || !board) return false
     const r = await run(['balance'])
-    if (!r.out || r.out.error) return log.error('leaf wallet balance: ' + ((r.out && r.out.error && r.out.error.message) || r.stderr.trim()))
+    if (!r.out || r.out.error) { log.error('leaf wallet balance: ' + ((r.out && r.out.error && r.out.error.message) || r.stderr.trim())); return true }
+    let wanting = false
     for (const [label, id] of assets) {
       let pay
       try { pay = BigInt(toAtoms(amountFor(label))) } catch (e) { continue }
       const held = (r.out.arca && r.out.arca[id]) || {}
       const spendable = BigInt(held.live || 0) + BigInt(held['operator-confirmed'] || 0)
-      if (BigInt(held.pending || 0) > 0n || spendable >= pay * BigInt(low)) continue
+      if (spendable >= pay * BigInt(low)) { short.delete(label); continue }
+      wanting = true
+      if (BigInt(held.pending || 0) > 0n) continue
       const onchain = BigInt((r.out.sequentia_onchain && r.out.sequentia_onchain[id]) || 0)
       // What is left on the chain pays the board's fee, in the asset boarded.
       const amount = [pay * BigInt(board), onchain * 9n / 10n].reduce((a, b) => (a < b ? a : b))
       if (amount < pay) {
-        log.error(`leaf wallet: ${label} in leaves is ${toCoins(spendable)} and its on-chain coins (${toCoins(onchain)}) cannot board more; fund ${datadir} on-chain`)
+        // Said once, not at every look.
+        if (!short.has(label)) log.error(`leaf wallet: ${label} in leaves is ${toCoins(spendable)} and its on-chain coins (${toCoins(onchain)}) cannot board more; fund ${datadir} on-chain`)
+        short.add(label)
         continue
       }
+      short.delete(label)
       const b = await run(['board', id, amount.toString()])
       if (!b.out || b.out.error) log.error(`leaf wallet: boarding ${toCoins(amount)} ${label}: ${(b.out && b.out.error && b.out.error.message) || b.stderr.trim()}`)
       else log.log(`leaf wallet: boarded ${toCoins(amount)} ${label}`)
     }
+    return wanting
   }
 
   // One sync, the wallet's info and a top-up; when the next sync is due.
@@ -129,7 +140,7 @@ function init (cfg) {
         wait = syncMinMs
       }
       await readInfo()
-      await topUp()
+      if (await topUp()) wait = Math.min(wait, syncMinMs)
     })
     wait = Math.min(Math.max(wait, syncMinMs), syncMaxMs)
     state.next = Date.now() + wait
