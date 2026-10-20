@@ -70,6 +70,7 @@ async function start (t, env = {}) {
   const s = {
     log: () => log,
     commands,
+    stateFile: state,
     get: async p => (await fetch(url + p)).json(),
     post: async (body, ip) => {
       const r = await fetch(url + '/', { method: 'POST', headers: { 'content-type': 'application/json', ...(ip ? { 'x-forwarded-for': ip } : {}) }, body: JSON.stringify(body) })
@@ -184,6 +185,25 @@ test('the leaf wallet syncs on its schedule, boards when low and refuses work on
   const r = await other.post({ request: request() })
   assert.equal(r.status, 503)
   assert.equal(other.commands().filter(c => c[0] === 'send').length, 0)
+})
+
+test('a low asset is looked at again soon, not at the schedule\'s longest wait, and boarded once its coins arrive', async t => {
+  const s = await start(t, { FAUCET_LEAF_SYNC_MIN_MS: '100', FAUCET_LEAF_SYNC_MAX_MS: '60000', FAKE_ARCA_NEXT: '3600' })
+  await new Promise(r => setTimeout(r, 700))
+  // The wallet's schedule asks for its next sync in an hour; USDX is short, so
+  // the faucet looks again at its shortest interval, and says so only once.
+  const syncs = s.commands().filter(c => c[0] === 'sync').length
+  assert.ok(syncs >= 3, `synced ${syncs} times`)
+  assert.equal((s.log().match(/USDX in leaves is 0 and its on-chain coins \(0\) cannot board more/g) || []).length, 1)
+  // Its on-chain coins arrive: boarded at the next look.
+  let boarded = []
+  for (let i = 0; i < 40 && !boarded.length; i++) {
+    const st = JSON.parse(fs.readFileSync(s.stateFile, 'utf8'))
+    if (!st.onchain[Y]) { st.onchain[Y] = '100000000000000000'; fs.writeFileSync(s.stateFile, JSON.stringify(st)) }
+    await new Promise(r => setTimeout(r, 100))
+    boarded = s.commands().filter(c => c[0] === 'board' && c[1] === Y)
+  }
+  assert.equal(boarded.length, 1)
 })
 
 test('without a leaf wallet, a receive request is refused and the page offers none', async t => {
