@@ -31,6 +31,11 @@ if (command === 'bitcoin') {
   // The Bitcoin side, as Bark answers: `balance` and `send <destination> <n> sats`.
   const [, sub, dest, amount] = rest
   if (state.bark === undefined) state.bark = Number(process.env.FAKE_BARK_SATS || 5000000)
+  // FAKE_BARK_HELD: the first sends find the wallet held by another process, as Bark says.
+  if (sub === 'send' && Number(process.env.FAKE_BARK_HELD || 0) > (state.held || 0)) {
+    state.held = (state.held || 0) + 1; save()
+    process.stderr.write('Error: failed to lock wallet database: another process holds it\n'); process.exit(1)
+  }
   if (sub === 'balance') out({ spendable_sat: state.bark, pending_board_sat: 0 })
   else if (sub === 'send') {
     const sats = Number(String(amount).replace(/ sats$/, ''))

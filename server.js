@@ -189,7 +189,8 @@ if (BTC_ARCA && !BTC_DATADIR) {
 const btc = BTC_ARCA ? require('./btc').init({
   arca: BTC_ARCA,
   datadir: BTC_DATADIR,
-  refreshMs: Number(process.env.FAUCET_BTC_REFRESH_MS || 60000)
+  refreshMs: Number(process.env.FAUCET_BTC_REFRESH_MS || 60000),
+  lockWaitMs: Number(process.env.FAUCET_BTC_LOCK_WAIT_MS || 3000)
 }) : null
 if (btc) btc.start()
 

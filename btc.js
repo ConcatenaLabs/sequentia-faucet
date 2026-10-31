@@ -43,14 +43,26 @@ function spendableOf (b) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
 }
 
-function init ({ arca, datadir, refreshMs = 60000, log = console }) {
-  const run = (args, timeout = 120000) => new Promise(resolve => {
+function init ({ arca, datadir, refreshMs = 60000, lockRetries = 5, lockWaitMs = 3000, log = console }) {
+  const once = (args, timeout) => new Promise(resolve => {
     execFile(arca, ['--datadir', datadir, 'bitcoin', '--quiet', ...args], { timeout, maxBuffer: 1 << 22 }, (err, stdout, stderr) => {
       let out = null
       try { out = JSON.parse(stdout) } catch (e) {}
       resolve({ err, out, stdout: String(stdout || ''), stderr: String(stderr || '') })
     })
   })
+  // Bark lets one process at a time open its wallet, and the operator's top-up
+  // runs it now and then too: a command that finds the wallet held is tried
+  // again a few times before it counts as failed.
+  const held = r => r.err && /lock/i.test(r.stderr + ' ' + (r.err.message || ''))
+  async function run (args, timeout = 120000) {
+    let r = await once(args, timeout)
+    for (let i = 0; i < lockRetries && held(r); i++) {
+      await new Promise(ok => setTimeout(ok, lockWaitMs))
+      r = await once(args, timeout)
+    }
+    return r
+  }
   let queue = Promise.resolve()
   const serial = f => { const p = queue.then(f, f); queue = p.catch(() => {}); return p }
   const why = r => (r.out && r.out.error && (r.out.error.message || r.out.error)) || r.stderr.trim().split('\n').pop() || (r.err && r.err.message) || 'Bark did not answer'
