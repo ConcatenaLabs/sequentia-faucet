@@ -1,8 +1,9 @@
 # Sequentia testnet faucet
 
-Free testnet coins: tSEQ and the sample assets (USDX, EURX, GOLD, SILVR, OILX),
-sent to any Sequentia address, so they can be used from a full node or from any
-Sequentia wallet.
+Free testnet coins: BTC (testnet4), tSEQ and the sample assets (USDX, EURX,
+GOLD, SILVR, OILX), sent to a wallet's receive code or to any Sequentia address,
+so they can be used from the web wallet, from a full node or from any Sequentia
+wallet.
 
 USDX is the settlement currency the platforms here price things in, so it is
 handed out in the amounts those platforms deal in rather than in samples: a raise
@@ -19,8 +20,11 @@ Live at [sequentiatestnet.com/faucet](https://sequentiatestnet.com/faucet).
 { "address": "tb1...", "asset": "USDX" }
 ```
 
-`asset` is optional; omitting it sends tSEQ. On success the response carries the
-txid:
+`asset` is optional; omitting it sends tSEQ. `address` may be a wallet's
+receive code (`BITCOIN:<ADDRESS>?ark=…&sequentia=…`, the web wallet's format,
+written by its `pay-code.js`) in place of an address: the faucet reads the part
+it pays (`receive-code.js`), the code's address for every asset and, for BTC,
+its address on the Bitcoin ark. On success the response carries the txid:
 
 ```json
 { "txid": "...", "amount": "500000", "asset": "USDX" }
@@ -63,7 +67,31 @@ or another chain, an asset the operator does not serve or the faucet does not
 pay as a leaf, a request naming another asset than the one asked, and anything
 that is not a receive request. A `503` says the faucet has no leaves of the
 asset to pay now, and a faucet without a leaf wallet answers every receive
-request with a `400`. The page itself offers only addresses.
+request with a `400`. The page itself sends what is pasted, a receive code or an
+address.
+
+### BTC
+
+`{ "address": "<receive code or tb1 address>", "asset": "BTC" }` pays testnet4
+bitcoin from the Bitcoin side of the faucet's own `arca` wallet (Bark's wallet
+for the Bitcoin ark, `btc.js`). A receive code with an `ark` part is paid
+there, which is where the web wallet holds BTC, and it arrives in seconds; a
+plain `tb1` address is paid on chain. The response is
+`{ "amount": "0.001", "asset": "BTC", "ark": true, "txid": null }` (`txid` set
+for an on-chain payment). The amount follows what the wallet can send now:
+
+| BTC the faucet can send | BTC per request |
+| --- | --- |
+| 0.02 or more | 0.001 |
+| 0.005 to 0.02 | 0.0005 |
+| 0.001 to 0.005 | 0.0002 |
+| under 0.001 | nothing (`503`) |
+
+`GET /faucet/amount?asset=BTC` returns the amount in force. The same limits
+apply: once per cooldown per address, per ark address and per IP. The wallet is
+the faucet's alone; the operator keeps it topped up from the testnet4 service
+wallet (sequentia-testnet-ops, consumer `faucet-btc`). A faucet without
+`FAUCET_BTC_ARCA` answers BTC requests with a `400`.
 
 ## Running it
 
@@ -96,6 +124,9 @@ environment variable:
 | `FAUCET_LEAF_ASSETS` | unset | with `FAUCET_LEAF_ARCA`: the assets paid as leaves, `label=asset id,…` (`tSEQ=<id>,USDX=<id>`) |
 | `FAUCET_LEAF_LOW` | `5` | board more of an asset when the leaves hold fewer payouts of it than this (`0`: never board) |
 | `FAUCET_LEAF_BOARD` | `20` | how many payouts of an asset one board brings in |
+| `FAUCET_BTC_ARCA` | unset | the `arca` command line; set, BTC is paid from its wallet's Bitcoin side (Bark's `bark` named by `ARCA_BARK_EXEC`) |
+| `FAUCET_BTC_DATADIR` | unset | with `FAUCET_BTC_ARCA`: the `arca` wallet's directory, whose `bitcoin/` holds the Bitcoin side |
+| `FAUCET_BTC_REFRESH_MS` | `60000` | how often the Bitcoin side's balance is read |
 | `FAUCET_LEAF_SYNC_MIN_MS`, `FAUCET_LEAF_SYNC_MAX_MS` | `60000`, `3600000` | the bounds on the time between two syncs of the leaf wallet |
 
 ## How much tSEQ a request pays

@@ -38,14 +38,15 @@
     <a href="/"><img src="/explorer/img/icons/SequentiaTestnet-menu-logo.svg" alt="Sequentia"></a>
     <h1>Sequentia <span class="t">faucet</span></h1>
   </div>
-  <p class="sub">Free testnet coins, sent straight to any Sequentia testnet address &mdash; your full node or the Sequentia Core desktop wallet.</p>
+  <p class="sub">Free testnet coins for the web wallet, Sequentia Core or any Sequentia testnet address.</p>
 
   <div class="panel">
-    <label for="addr">Your Sequentia testnet address</label>
-    <input type="text" id="addr" placeholder="tb1q&hellip;" spellcheck="false" autocomplete="off">
-    <p class="hint">In the desktop wallet: <b>Receive &rarr; Create new address</b>. From a node: <code>sequentia-cli getnewaddress</code>. No wallet yet? <a href="/download/core/" style="color:#f5b301;text-decoration:none">Download Sequentia Core</a>.</p>
+    <label for="addr">Your receive code or address</label>
+    <input type="text" id="addr" placeholder="BITCOIN:TB1&hellip; or tb1&hellip;" spellcheck="false" autocomplete="off">
+    <p class="hint">In the web wallet: <b>Receive &rarr; Copy receive code</b>. In Sequentia Core: <b>Receive &rarr; Create new address</b>. From a node: <code>sequentia-cli getnewaddress</code>. No wallet yet? <a href="/wallet/" style="color:#f5b301;text-decoration:none">Open the web wallet</a>; it has this faucet built in.</p>
 
     <div class="assets" id="assets">
+      <button data-asset="BTC"><b>BTC</b><small id="btcAmount">testnet4 bitcoin</small></button>
       <button data-asset=""><b>tSEQ</b><small id="tseqAmount">Sequence token</small></button>
       <button data-asset="USDX"><b>USDX</b><small>test dollar</small></button>
       <button data-asset="EURX"><b>EURX</b><small>test euro</small></button>
@@ -71,14 +72,39 @@ addrInput.addEventListener('input',()=>localStorage.setItem('faucetAddr',addrInp
 fetch('/faucet/amount').then(r=>r.json()).then(j=>{
   if(j&&j.amount) $('tseqAmount').textContent=Number(j.amount).toLocaleString('en-US')+' per request';
 }).catch(()=>{});
+fetch('/faucet/amount?asset=BTC').then(r=>r.json()).then(j=>{
+  if(j&&Number(j.amount)>0) $('btcAmount').textContent=j.amount+' per request';
+}).catch(()=>{});
+
+// A wallet's receive code (BITCOIN:<ADDRESS>?ark=…&sequentia=…), read for its
+// parts; the same reader as the faucet's own receive-code.js. -> the parts, or
+// null when the text is not a code.
+function readReceiveCode(text){
+  const s=String(text==null?'':text).trim();
+  const m=/^bitcoin:([^?#]*)(?:\?([^#]*))?/i.exec(s);
+  if(!m) return null;
+  const plain=v=>{try{return decodeURIComponent(v.replace(/\+/g,'%20'));}catch(e){return null;}};
+  const lower=v=>(v&&(v===v.toUpperCase()||v===v.toLowerCase())?v.toLowerCase():v);
+  const out={address:lower(plain(m[1]))||null,ark:null,sequentia:null};
+  for(const part of (m[2]||'').split('&')){
+    const i=part.indexOf('='); if(i<1) continue;
+    const key=part.slice(0,i).toLowerCase();
+    if((key==='ark'||key==='sequentia')&&out[key]===null) out[key]=lower(plain(part.slice(i+1)))||null;
+  }
+  return out;
+}
 
 function msg(cls,html){const d=document.createElement('div');d.className='msg '+cls;d.innerHTML=html;$('log').prepend(d);return d;}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
+// The text as given when it is a receive code (the faucet reads the part it
+// pays), else a plain address.
 function checkAddr(){
   const a=addrInput.value.trim();
-  if(!a){msg('err','Enter an address first.');addrInput.focus();return null;}
-  if(!/^[a-zA-Z0-9]{14,120}$/.test(a)){msg('err','That doesn’t look like a valid address.');return null;}
+  if(!a){msg('err','Paste a receive code or an address first.');addrInput.focus();return null;}
+  const c=readReceiveCode(a);
+  if(c){ if(c.address||c.ark) return a; msg('err','That receive code names no address.'); return null; }
+  if(!/^[a-zA-Z0-9]{14,120}$/.test(a)){msg('err','That doesn’t look like a receive code or an address.');return null;}
   return a;
 }
 
@@ -91,9 +117,12 @@ async function requestOne(asset,addr){
     let j; try{j=await r.json();}catch(e){j={};}
     if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
     busy.className='msg ok';
-    busy.innerHTML='Sent '+esc(Number(j.amount).toLocaleString('en-US'))+' '+esc(j.asset)+
-      ' &mdash; <a href="/explorer/tx/'+esc(j.txid)+'" target="_blank" rel="noopener">'+esc(String(j.txid).slice(0,16))+'&hellip;</a>'+
-      ' It will appear once it confirms (about a minute).';
+    const sent='Sent '+esc(j.asset==='BTC'?j.amount:Number(j.amount).toLocaleString('en-US'))+' '+esc(j.asset)+'. ';
+    if(j.asset==='BTC'&&j.ark) busy.innerHTML=sent+'It is in your wallet in seconds.';
+    else if(j.asset==='BTC'&&!j.txid) busy.innerHTML=sent+'It arrives after a Bitcoin block.';
+    else if(j.asset==='BTC') busy.innerHTML=sent+'<a href="https://mempool.space/testnet4/tx/'+esc(j.txid)+'" target="_blank" rel="noopener">'+esc(String(j.txid).slice(0,16))+'&hellip;</a> It arrives after a Bitcoin block.';
+    else if(j.txid) busy.innerHTML=sent+'<a href="/explorer/tx/'+esc(j.txid)+'" target="_blank" rel="noopener">'+esc(String(j.txid).slice(0,16))+'&hellip;</a> It arrives after the next block, in about a minute.';
+    else busy.innerHTML=sent+'It is in your wallet in seconds.';
   }catch(e){
     busy.className='msg err';
     busy.textContent=label+': '+(e&&e.message?e.message:e);
