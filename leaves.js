@@ -98,7 +98,9 @@ function init (cfg) {
   const short = new Set()
   async function topUp () {
     if (!low || !board) return false
-    const r = await run(['balance'])
+    // The leaf wallet's own balance only: Bark, which holds the Bitcoin side,
+    // lets one process at a time open its wallet, and btc.js runs it.
+    const r = await run(['balance', '--without-bitcoin'])
     if (!r.out || r.out.error) { log.error('leaf wallet balance: ' + ((r.out && r.out.error && r.out.error.message) || r.stderr.trim())); return true }
     let wanting = false
     for (const [label, id] of assets) {

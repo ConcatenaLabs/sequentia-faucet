@@ -127,6 +127,7 @@ environment variable:
 | `FAUCET_BTC_ARCA` | unset | the `arca` command line; set, BTC is paid from its wallet's Bitcoin side (Bark's `bark` named by `ARCA_BARK_EXEC`) |
 | `FAUCET_BTC_DATADIR` | unset | with `FAUCET_BTC_ARCA`: the `arca` wallet's directory, whose `bitcoin/` holds the Bitcoin side |
 | `FAUCET_BTC_REFRESH_MS` | `60000` | how often the Bitcoin side's balance is read |
+| `FAUCET_BTC_LOCK_WAIT_MS` | `3000` | the wait before a Bark command that found the wallet held by another process is tried again (five times at most) |
 | `FAUCET_LEAF_SYNC_MIN_MS`, `FAUCET_LEAF_SYNC_MAX_MS` | `60000`, `3600000` | the bounds on the time between two syncs of the leaf wallet |
 
 ## How much tSEQ a request pays

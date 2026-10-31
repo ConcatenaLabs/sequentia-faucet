@@ -109,6 +109,17 @@ test('BTC to a plain tb1 address is paid on chain; anything else is refused', as
   assert.equal(blinded.body.error, 'BTC is paid to a receive code or to a tb1 address.')
 })
 
+test('a send that finds Bark\'s wallet held by another process is tried again', async t => {
+  const s = await start(t, { FAKE_BARK_HELD: '2', FAUCET_BTC_LOCK_WAIT_MS: '50' })
+  const r = await s.post({ address: CODE, asset: 'BTC' }, '10.0.0.7')
+  assert.equal(r.status, 200, JSON.stringify(r.body))
+  assert.equal(s.commands().filter(c => c[0] === 'bitcoin' && c[2] === 'send').length, 3)
+})
+
+test('the leaf wallet reads its balance without running Bark', () => {
+  assert.match(require('node:fs').readFileSync(path.join(ROOT, 'leaves.js'), 'utf8'), /run\(\['balance', '--without-bitcoin'\]\)/)
+})
+
 test('a faucet low on BTC pays nothing, and says so', async t => {
   const s = await start(t, { FAKE_BARK_SATS: '50000' })
   await new Promise(r => setTimeout(r, 300))
