@@ -27,7 +27,20 @@ const median = Number(process.env.FAKE_ARCA_MEDIAN || 1800000000)
 const out = v => { process.stdout.write(JSON.stringify(v) + '\n') }
 const fail = (kind, message, extra = {}) => { out({ error: { kind, message, ...extra } }); process.exit(1) }
 
-if (command === 'info') {
+if (command === 'bitcoin') {
+  // The Bitcoin side, as Bark answers: `balance` and `send <destination> <n> sats`.
+  const [, sub, dest, amount] = rest
+  if (state.bark === undefined) state.bark = Number(process.env.FAKE_BARK_SATS || 5000000)
+  if (sub === 'balance') out({ spendable_sat: state.bark, pending_board_sat: 0 })
+  else if (sub === 'send') {
+    const sats = Number(String(amount).replace(/ sats$/, ''))
+    if (!(sats > 0)) { process.stderr.write('bad amount ' + amount + '\n'); process.exit(1) }
+    if (sats > state.bark) { process.stderr.write('Error: Insufficient money available\n'); process.exit(1) }
+    state.bark -= sats
+    save()
+    out(dest.startsWith('tark1') ? { amount_sat: sats } : { txid: 'c'.repeat(64) })
+  } else { process.stderr.write('unknown bitcoin command ' + sub + '\n'); process.exit(2) }
+} else if (command === 'info') {
   out({
     operator: process.env.FAKE_ARCA_OPERATOR, genesis_hash: GENESIS, tip: { height: 10, median_time: median },
     server_info: { assets: [{ asset: X, min_leaf: '1000' }, { asset: Y, min_leaf: '1000' }] }

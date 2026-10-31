@@ -72,6 +72,11 @@ const tierFor = balance => TIERS.find(([floor]) => balance >= floor)[1]
 // bech32/blech32 data charset. Sequentia is transparent by default (tb1); the
 // blinded form (tsqb1) is opt-in and equally fundable.
 const ADDR_RE = /^(tb1|tsqb1)[ac-hj-np-z02-9]{20,180}$/
+// A testnet4 Bitcoin address of the shared form (tb1), and an address on the
+// Bitcoin ark (Bark's `tark1`), for BTC payouts.
+const BTC_ADDR_RE = /^tb1[ac-hj-np-z02-9]{20,90}$/
+const ARK_ADDR_RE = /^tark1[ac-hj-np-z02-9]{20,200}$/
+const { readReceiveCode } = require('./receive-code')
 
 // label -> amount. A fixed allowlist, so the asset can never be anything the
 // operator did not put here.
@@ -172,6 +177,22 @@ const leaves = LEAF_ARCA ? require('./leaves').init({
 }) : null
 if (leaves) leaves.start()
 
+// BTC payouts. With FAUCET_BTC_ARCA set, BTC (testnet4) is paid from the
+// Bitcoin side of the `arca` wallet on FAUCET_BTC_DATADIR (btc.js): to a
+// receive code's address on the Bitcoin ark, else on chain to an address.
+const BTC_ARCA = process.env.FAUCET_BTC_ARCA || ''
+const BTC_DATADIR = process.env.FAUCET_BTC_DATADIR || ''
+if (BTC_ARCA && !BTC_DATADIR) {
+  console.error('FAUCET_BTC_ARCA is set: FAUCET_BTC_DATADIR must name the arca wallet whose Bitcoin side pays BTC')
+  process.exit(1)
+}
+const btc = BTC_ARCA ? require('./btc').init({
+  arca: BTC_ARCA,
+  datadir: BTC_DATADIR,
+  refreshMs: Number(process.env.FAUCET_BTC_REFRESH_MS || 60000)
+}) : null
+if (btc) btc.start()
+
 const app = express()
 app.disable('x-powered-by')
 // One trusted hop: the site front door proxies to us and forwards the original
@@ -180,8 +201,32 @@ app.set('trust proxy', 1)
 
 app.get('/healthz', (req, res) => res.json({ ok: true }))
 
-// What a tSEQ request pays right now, so the page can say so before the click.
-app.get('/amount', (req, res) => res.json({ amount: currentAmount(), asset: 'tSEQ' }))
+// What a tSEQ request pays right now, so the page can say so before the click;
+// with `?asset=BTC`, what a BTC request pays (0 while the faucet has none).
+app.get('/amount', (req, res) => {
+  if (req.query.asset === 'BTC') {
+    const sats = btc ? btc.amount() : 0
+    return res.json({ amount: sats ? require('./btc').btc(sats) : '0', asset: 'BTC' })
+  }
+  res.json({ amount: currentAmount(), asset: 'tSEQ' })
+})
+
+// A BTC payout: to the code's address on the Bitcoin ark when it has one,
+// else on chain to the address. Limited like every asset, per address and IP.
+function payBtc (req, res, address, ark, ip) {
+  if (!btc) return res.status(400).json({ error: 'This faucet does not pay BTC.' })
+  if (ark && !ARK_ADDR_RE.test(ark)) return res.status(400).json({ error: 'The receive code\'s Bitcoin ark address is not one this faucet can pay.' })
+  if (!ark && !BTC_ADDR_RE.test(address)) return res.status(400).json({ error: 'BTC is paid to a receive code or to a tb1 address.' })
+  if (tooSoon('a:BTC:' + address) || tooSoon('i:BTC:' + ip) || (ark && tooSoon('k:BTC:' + ark)))
+    return res.status(429).json({ error: 'Already funded recently; please wait before requesting again.' })
+  let paying
+  try { paying = btc.pay({ address, ark }) } catch (e) { return res.status(e.status || 502).json({ error: e.message }) }
+  paying.then(p => {
+    seen.set('a:BTC:' + address, Date.now()); seen.set('i:BTC:' + ip, Date.now())
+    if (ark) seen.set('k:BTC:' + ark, Date.now())
+    res.json({ amount: p.amount, asset: 'BTC', ark: p.ark, txid: p.txid })
+  }, e => res.status(e.status || 502).json({ error: e.message }))
+}
 
 // execFile (no shell) plus a strict address regex means the user-supplied address
 // cannot inject anything; it is only ever one argv element. The optional asset is
@@ -236,9 +281,14 @@ function payLeaf (req, res, ip) {
 
 app.post('/', express.json({ limit: '8kb' }), (req, res) => {
   if (req.body && req.body.request !== undefined) return payLeaf(req, res, String(req.ip || req.socket.remoteAddress || '').trim())
-  const address = String((req.body && req.body.address) || '').trim()
-  if (!ADDR_RE.test(address)) return res.status(400).json({ error: 'Enter a valid Sequentia address.' })
+  // A receive code is read for the part this faucet pays: its address, and
+  // for BTC its address on the Bitcoin ark too.
+  const given = String((req.body && req.body.address) || '').trim()
+  const code = readReceiveCode(given)
+  const address = code ? (code.address || '') : given
   const asset = String((req.body && req.body.asset) || '').trim()   // '' = native tSEQ
+  if (asset === 'BTC') return payBtc(req, res, address, code && code.ark, String(req.ip || req.socket.remoteAddress || '').trim())
+  if (!ADDR_RE.test(address)) return res.status(400).json({ error: code ? 'That receive code names no Sequentia address.' : 'Enter a valid Sequentia address or receive code.' })
   if (asset && !Object.prototype.hasOwnProperty.call(ASSETS, asset))
     return res.status(400).json({ error: 'Unknown faucet asset.' })
   const unit = asset || 'tSEQ'

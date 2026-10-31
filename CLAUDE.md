@@ -6,7 +6,9 @@ One service, one page, one endpoint. Keep it that way.
 
 The testnet faucet: `server.js` sends coins from a funded node wallet, or tSEQ
 from a drip covenant through the tool in `drip/`, or pays a receive request as
-a leaf from its own Arca wallet through `leaves.js`, and `public/index.html` is
+a leaf from its own Arca wallet through `leaves.js`, or BTC from that wallet's
+Bitcoin side (Bark) through `btc.js`; `receive-code.js` reads a wallet's receive
+code where an address is asked for, and `public/index.html` is
 the page people use to ask for them. The page and server have no build step, no
 database, and no state that survives a restart; the drip tool is a Rust command
 built with cargo.
