@@ -47,13 +47,18 @@ function freePort () {
 }
 const base = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('FAUCET_') && !k.startsWith('FAKE_')))
 
+// Each request comes through the front door from an address of its own unless
+// the test names one: a request straight to the loopback is our own tooling's.
+let ipSeq = 0
+const nextIp = () => '198.51.100.' + (++ipSeq % 250 + 1)
+
 async function start (t, env = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'faucet-btc-'))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const state = path.join(dir, 'state.json')
   const port = await freePort()
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: { ...base(), FAUCET_PORT: String(port), FAUCET_CLI: '/bin/echo', FAUCET_DATADIR: '/nowhere',
+    env: { ...base(), FAUCET_PORT: String(port), FAUCET_CLI: '/bin/echo', FAUCET_DATADIR: '/nowhere', FAUCET_LEDGER: path.join(dir, 'claims.jsonl'),
       FAUCET_BTC_ARCA: path.join(__dirname, 'fake-arca.js'), FAUCET_BTC_DATADIR: dir, FAKE_ARCA_STATE: state, ...env },
     stdio: ['ignore', 'pipe', 'pipe']
   })
@@ -68,7 +73,7 @@ async function start (t, env = {}) {
     commands,
     get: async p => (await fetch(url + p)).json(),
     post: async (body, ip) => {
-      const r = await fetch(url + '/', { method: 'POST', headers: { 'content-type': 'application/json', ...(ip ? { 'x-forwarded-for': ip } : {}) }, body: JSON.stringify(body) })
+      const r = await fetch(url + '/', { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': ip || nextIp() }, body: JSON.stringify(body) })
       return { status: r.status, body: await r.json() }
     }
   }
@@ -86,7 +91,7 @@ test('an asset asked for with a receive code goes to the code\'s address', async
   assert.equal(bad.body.error, 'That receive code names no Sequentia address.')
 })
 
-test('BTC goes to a receive code\'s Bitcoin ark address, at the tier, once per cooldown', async t => {
+test('BTC goes to a receive code\'s Bitcoin ark address, at the tier, once per wallet', async t => {
   const s = await start(t)
   assert.deepEqual(await s.get('/amount?asset=BTC'), { amount: '0.001', asset: 'BTC' })
   const r = await s.post({ address: CODE, asset: 'BTC' }, '10.0.0.1')
@@ -96,6 +101,12 @@ test('BTC goes to a receive code\'s Bitcoin ark address, at the tier, once per c
   assert.deepEqual(send, ['bitcoin', '--quiet', 'send', ARK, '100000 sats'])
   assert.equal((await s.post({ address: CODE, asset: 'BTC' }, '10.0.0.2')).status, 429, 'the same code again')
   assert.equal((await s.post({ address: 'bitcoin:' + ADDR, asset: 'BTC' }, '10.0.0.1')).status, 429, 'the same IP again')
+  // A wallet id is kept for BTC too: another address of the wallet is refused.
+  const w = 'ef'.repeat(32)
+  assert.equal((await s.post({ wallet: w, address: 'tb1q' + 'q'.repeat(38), asset: 'BTC' }, '10.0.0.8')).status, 200)
+  const again = await s.post({ wallet: w, address: 'tb1q' + 'p'.repeat(38), asset: 'BTC' }, '10.0.0.9')
+  assert.equal(again.status, 429)
+  assert.match(again.body.error, /^This wallet has already received its BTC from the faucet\./)
 })
 
 test('BTC to a plain tb1 address is paid on chain; anything else is refused', async t => {
@@ -131,8 +142,10 @@ test('a faucet low on BTC pays nothing, and says so', async t => {
 
 test('without a Bitcoin side, BTC is refused', async t => {
   const port = await freePort()
+  const ledger = path.join(os.tmpdir(), 'faucet-noside-' + port + '.jsonl')
+  t.after(() => fs.rmSync(ledger, { force: true }))
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: { ...base(), FAUCET_PORT: String(port), FAUCET_CLI: '/bin/echo', FAUCET_DATADIR: '/nowhere' }, stdio: ['ignore', 'pipe', 'pipe']
+    env: { ...base(), FAUCET_PORT: String(port), FAUCET_CLI: '/bin/echo', FAUCET_DATADIR: '/nowhere', FAUCET_LEDGER: ledger }, stdio: ['ignore', 'pipe', 'pipe']
   })
   t.after(() => child.kill())
   await new Promise(resolve => child.stdout.on('data', d => { if (String(d).includes('listening')) resolve() }))

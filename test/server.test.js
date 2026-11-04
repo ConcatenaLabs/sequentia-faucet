@@ -26,10 +26,20 @@ function freePort () {
 // runs on what its test gives it and nothing the shell happens to set.
 const base = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('FAUCET_')))
 
-async function start (t, env) {
+// Each request comes through the front door from an address of its own unless
+// the test names one: a request straight to the loopback is our own tooling's.
+let ipSeq = 0
+const nextIp = () => '198.51.100.' + (++ipSeq % 250 + 1)
+
+async function start (t, env, ledger) {
   const port = await freePort()
+  if (!ledger) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'faucet-ledger-'))
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+    ledger = path.join(dir, 'claims.jsonl')
+  }
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: { ...base(), FAUCET_PORT: String(port), FAUCET_CLI: '/bin/echo', FAUCET_DATADIR: '/nowhere', ...env },
+    env: { ...base(), FAUCET_PORT: String(port), FAUCET_CLI: '/bin/echo', FAUCET_DATADIR: '/nowhere', FAUCET_LEDGER: ledger, ...env },
     stdio: ['ignore', 'pipe', 'pipe']
   })
   t.after(() => child.kill())
@@ -40,8 +50,11 @@ async function start (t, env) {
   const url = 'http://127.0.0.1:' + port
   return {
     get: async p => (await fetch(url + p)).json(),
-    post: async body => {
-      const r = await fetch(url + '/', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    child,
+    post: async (body, ip, headers = {}) => {
+      const h = { 'content-type': 'application/json', ...headers }
+      if (ip !== null) h['x-forwarded-for'] = ip || nextIp()
+      const r = await fetch(url + '/', { method: 'POST', headers: h, body: JSON.stringify(body) })
       return { status: r.status, body: await r.json() }
     }
   }
@@ -73,9 +86,7 @@ test('the drip covenant pays tSEQ, once per interval, to transparent addresses',
     FAUCET_DRIP: path.join(__dirname, 'fake-drip.js'),
     FAUCET_DRIP_INSTANCE: path.join(dir, 'instance.json'),
     FAUCET_DRIP_MNEMONIC: path.join(dir, 'faucet.mnemonic'),
-    FAKE_DRIP_STATE: state,
-    // A short cooldown, so that a second address from this one IP reaches the reserve.
-    FAUCET_COOLDOWN_MS: '50'
+    FAKE_DRIP_STATE: state
   })
   for (let i = 0; i < 50 && (await s.get('/amount')).amount !== '50000'; i++) await new Promise(r => setTimeout(r, 100))
   assert.deepEqual(await s.get('/amount'), { amount: '50000', asset: 'tSEQ' }, 'the tier the covenant holds')
@@ -120,8 +131,7 @@ test('a drip never overlaps the status check: the node runs one scan at a time',
     FAKE_DRIP_STATE: state,
     FAKE_DRIP_SCAN_MS: '150',
     FAKE_DRIP_EVERY_TIME: '1',
-    FAUCET_BALANCE_REFRESH_MS: '20',
-    FAUCET_COOLDOWN_MS: '1'
+    FAUCET_BALANCE_REFRESH_MS: '20'
   })
   for (let i = 0; i < 50 && (await s.get('/amount')).amount !== '50000'; i++) await new Promise(r => setTimeout(r, 100))
   for (let i = 0; i < 6; i++) {

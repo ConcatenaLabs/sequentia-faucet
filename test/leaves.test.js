@@ -41,6 +41,11 @@ function freePort () {
 }
 const base = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('FAUCET_') && !k.startsWith('FAKE_')))
 
+// Each request comes through the front door from an address of its own unless
+// the test names one: a request straight to the loopback is our own tooling's.
+let ipSeq = 0
+const nextIp = () => '198.51.100.' + (++ipSeq % 250 + 1)
+
 async function start (t, env = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'faucet-leaves-'))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
@@ -51,7 +56,7 @@ async function start (t, env = {}) {
   const port = await freePort()
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
     env: {
-      ...base(), FAUCET_PORT: String(port), FAUCET_CLI: cli, FAUCET_DATADIR: '/nowhere',
+      ...base(), FAUCET_PORT: String(port), FAUCET_CLI: cli, FAUCET_DATADIR: '/nowhere', FAUCET_LEDGER: path.join(dir, 'claims.jsonl'),
       FAUCET_LEAF_ARCA: path.join(__dirname, 'fake-arca.js'), FAUCET_LEAF_DATADIR: path.join(dir, 'leaves'),
       FAUCET_LEAF_OPERATOR: OPERATOR, FAUCET_LEAF_ASSETS: `tSEQ=${X},USDX=${Y},EURX=${Z}`,
       FAKE_ARCA_STATE: state, FAKE_ARCA_OPERATOR: OPERATOR, FAKE_ARCA_MEDIAN: String(MEDIAN), ...env
@@ -74,7 +79,7 @@ async function start (t, env = {}) {
     stateFile: state,
     get: async p => (await fetch(url + p)).json(),
     post: async (body, ip) => {
-      const r = await fetch(url + '/', { method: 'POST', headers: { 'content-type': 'application/json', ...(ip ? { 'x-forwarded-for': ip } : {}) }, body: JSON.stringify(body) })
+      const r = await fetch(url + '/', { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': ip || nextIp() }, body: JSON.stringify(body) })
       return { status: r.status, body: await r.json() }
     }
   }
@@ -114,7 +119,7 @@ test('a receive request is paid as a leaf at the tier and amounts of on-chain pa
   assert.equal(older.status, 200, JSON.stringify(older.body))
 })
 
-test('the same limits as on-chain payouts: per wallet and per IP, the IP shared with on-chain requests', async t => {
+test('the same limits as on-chain payouts: once per wallet, and per IP for a day, the IP shared with on-chain requests', async t => {
   const s = await start(t)
   const mailbox = 'cd'.repeat(32)
   assert.equal((await s.post({ request: request({ mailbox }) }, '10.0.1.1')).status, 200)
@@ -132,6 +137,13 @@ test('the same limits as on-chain payouts: per wallet and per IP, the IP shared 
   r = await s.post({ request: request({ mailbox }), asset: 'USDX' }, '10.0.1.1')
   assert.notEqual(r.status, 429)
   assert.equal(s.commands().filter(c => c[0] === 'send').length, before + 1)
+  // The wallet's id: a leaf and an on-chain payout of one asset count together.
+  const w = '12'.repeat(32)
+  r = await s.post({ wallet: w, request: request() }, '10.0.1.5')
+  assert.equal(r.status, 200, JSON.stringify(r.body))
+  r = await s.post({ wallet: w, address: 'tb1q' + 'p'.repeat(38) }, '10.0.1.6')
+  assert.equal(r.status, 429)
+  assert.equal(r.body.reason, 'wallet')
 })
 
 test('refused: a lapsed request, an unserved asset, another operator or chain, and malformed requests', async t => {
@@ -213,8 +225,10 @@ test('a low asset is looked at again soon, not at the schedule\'s longest wait, 
 
 test('without a leaf wallet, a receive request is refused and the page offers none', async t => {
   const port = await freePort()
+  const ledger = path.join(os.tmpdir(), 'faucet-noside-' + port + '.jsonl')
+  t.after(() => fs.rmSync(ledger, { force: true }))
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: { ...base(), FAUCET_PORT: String(port), FAUCET_CLI: '/bin/echo', FAUCET_DATADIR: '/nowhere' }, stdio: ['ignore', 'pipe', 'pipe']
+    env: { ...base(), FAUCET_PORT: String(port), FAUCET_CLI: '/bin/echo', FAUCET_DATADIR: '/nowhere', FAUCET_LEDGER: ledger }, stdio: ['ignore', 'pipe', 'pipe']
   })
   t.after(() => child.kill())
   await new Promise(resolve => child.stdout.on('data', d => { if (String(d).includes('listening')) resolve() }))
