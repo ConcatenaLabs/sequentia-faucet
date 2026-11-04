@@ -12,6 +12,11 @@ Environment=FAUCET_PORT=9960
 Environment=FAUCET_CLI=/root/Sequentia/src/sequentia-cli
 Environment=FAUCET_DATADIR=/root/seq-testnet/node000
 Environment=FAUCET_WALLET=treasury2026
+# The claims ledger, outside the checkout, kept across restarts and deploys.
+Environment=FAUCET_LEDGER=/root/sequentia/faucet-state/claims.jsonl
+# The token that exempts our own tooling run from elsewhere (README); a file
+# readable by this service's user alone.
+#Environment=FAUCET_EXEMPT_TOKEN_FILE=/root/sequentia/faucet-state/exempt.token
 # To pay tSEQ from the drip covenant (README), set these three; the mnemonic
 # file is the faucet key, readable by this service's user alone.
 #Environment=FAUCET_DRIP=/root/sequentia/sequentia-faucet/drip/target/release/faucet-drip

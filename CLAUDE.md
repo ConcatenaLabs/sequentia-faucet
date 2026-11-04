@@ -9,8 +9,9 @@ from a drip covenant through the tool in `drip/`, or pays a receive request as
 a leaf from its own Arca wallet through `leaves.js`, or BTC from that wallet's
 Bitcoin side (Bark) through `btc.js`; `receive-code.js` reads a wallet's receive
 code where an address is asked for, and `public/index.html` is
-the page people use to ask for them. The page and server have no build step, no
-database, and no state that survives a restart; the drip tool is a Rust command
+the page people use to ask for them. The page and server have no build step and no
+database; the one state that survives a restart is the claims ledger
+(`ledger.js`), a file outside the checkout. The drip tool is a Rust command
 built with cargo.
 
 It lived inside `sequentia-explorer` until 2026-08-24, embedded in that repo's
@@ -43,11 +44,16 @@ the fee. Asset sends pay in the asset being sent; plain tSEQ sends pay in tSEQ,
 which the node labels `bitcoin` because it is the policy asset. A silent
 fallback to a default fee asset would be a privilege, and privileges are bugs.
 
-**Rate limiting is per address and per IP, and both must keep working.** The
-service sits behind one trusted proxy, which forwards the original
-`X-Forwarded-For`, so `trust proxy` is 1 and `req.ip` is the real client. Set it
-wrong and every request looks like it came from 127.0.0.1, which collapses the
-per-IP limit into a single global one.
+**Each asset is paid once per wallet, and the keys must keep working.** Every
+payout is kept in the claims ledger under the wallet's id, the address, the
+receive request's mailbox, the Bitcoin ark address and the IP (the IP's for a
+day), and a request any of whose keys was paid that asset is refused. A claim
+is written only after its payout succeeded and before the answer, and a key in
+flight refuses the same asset to every other request. The service sits behind
+one trusted proxy, which forwards the original `X-Forwarded-For`, so `trust
+proxy` is 1 and `req.ip` is the real client. A request with no forwarding
+header straight to the loopback is our own tooling and is exempt, so set the
+proxy wrong and every outside request would be exempt too.
 
 ## Testing a change
 
@@ -57,8 +63,10 @@ npm test
 ```
 
 The tests point `FAUCET_CLI` at `echo`, which exercises the whole request path,
-including validation and rate limiting, without moving coins: a bad address is
-rejected with 400, an unknown asset with 400, and a repeat request with 429. The
+including validation and the once-per-wallet rule, without moving coins: a bad
+address is rejected with 400, an unknown asset with 400, and a repeat request
+with 429. Tests send `X-Forwarded-For` as the front door does; one without it
+is exempt. The
 drip covenant's path runs against `test/fake-drip.js`, which answers as the
 drip tool does. A change to `drip/` also runs the tool against a local chain
 (`FAUCET_REGTEST_BIN` and `FAUCET_DRIP`, see the README); the covenant itself is

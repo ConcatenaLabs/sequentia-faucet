@@ -22,6 +22,57 @@ worth about as much at its market price.
 The amounts are fixed, not repriced as the market moves. tSEQ follows its own
 table (below).
 
+## Once per wallet
+
+The faucet pays each asset once per wallet. A wallet that has received its
+USDX gets no more USDX from the faucet, and gets more by trading for it; it can
+still ask for each asset it has not received. The rule is meant for people
+using a wallet or this page, and does not try to stop someone who sets out to
+get around it.
+
+Every payout is kept in a claims ledger (`FAUCET_LEDGER`), under each key the
+request carried:
+
+| key | from |
+| --- | --- |
+| the wallet's id | `wallet` in the request (below) |
+| the address | the address paid, or a receive code's address |
+| the wallet's mailbox | the receive request's `mailbox`, the same in every request one wallet makes, whether sent as `request` or inside a receive code |
+| the Bitcoin ark address | a receive code's `ark` part, for BTC |
+| the requester's IP | counted for a day only (`FAUCET_IP_WINDOW_MS`) |
+
+A request is refused with a `429` when any of its keys was paid that asset
+before (an IP's within the day). The ledger is a file outside the checkout,
+read when the faucet starts and written, and flushed to disk, before it
+answers, so a restart or a deploy forgets nothing. A payout is recorded only
+once it succeeded, and while one is being paid, any other request for the same
+asset that shares a key with it is refused, so two requests in flight never
+both pay. The file holds addresses, wallet ids and mailbox keys, which a
+payment to them would show anyway, and each IP only as a hash.
+
+A wallet's id is the hex of
+`sha256("sequentia-faucet-wallet/1" || scriptPubKey)`, where `scriptPubKey` is
+that of the wallet's first Sequentia receive address (index 0), the bytes of
+the script. Every wallet made from one phrase has the same id, on any device
+and after a restore, and the id says nothing a payment to that address would
+not. The web wallet, Ambra browser and Ambra mobile send it with every request,
+BTC included.
+
+`GET /faucet/claimed?wallet=<id>` (or `?address=<address>`) answers which
+assets that wallet has already received, so a wallet can show it without
+asking for a payout:
+
+```json
+{ "claimed": ["BTC", "USDX"] }
+```
+
+Our own services and scripts are never refused. A request that reaches the
+faucet directly on the loopback (`http://127.0.0.1:9960/`), with no proxy's
+forwarding header, comes from the box itself: the site front door always adds
+`X-Forwarded-For`, so no outside request looks like one. Tooling that runs
+elsewhere sends the token held in `FAUCET_EXEMPT_TOKEN_FILE` as the header
+`X-Faucet-Exempt`. Neither kind is checked against the ledger or kept in it.
+
 Live at [sequentiatestnet.com/faucet](https://sequentiatestnet.com/faucet).
 
 ## API
@@ -29,10 +80,11 @@ Live at [sequentiatestnet.com/faucet](https://sequentiatestnet.com/faucet).
 `POST /faucet`
 
 ```json
-{ "address": "tb1...", "asset": "USDX" }
+{ "address": "tb1...", "asset": "USDX", "wallet": "<64 hex>" }
 ```
 
-`asset` is optional; omitting it sends tSEQ. `address` may be a wallet's
+`asset` is optional; omitting it sends tSEQ. `wallet` is the wallet's id
+(above); a request without one is held to its other keys. `address` may be a wallet's
 receive code (`BITCOIN:<ADDRESS>?ark=…&sequentia=…`, the web wallet's format,
 written by its `pay-code.js`) in place of an address: the faucet reads the part
 it pays (`receive-code.js`), the code's address for every asset and, for BTC,
@@ -42,10 +94,23 @@ its address on the Bitcoin ark. On success the response carries the txid:
 { "txid": "...", "amount": "500000", "asset": "USDX" }
 ```
 
-Errors are `400` for an address that is not a valid Sequentia address or an
-asset that is not on the faucet's list, `429` when the same address or IP asked
-too recently, and `502` when the node refused the send (the node's own message
-is passed through).
+Errors are `400` for an address that is not a valid Sequentia address, an
+asset that is not on the faucet's list or a `wallet` that is not 64 hex digits,
+`429` when the request is refused under the rule above, and `502` when the node
+refused the send (the node's own message is passed through). A `429` says why
+in words a person can act on, and in `reason`:
+
+```json
+{ "asset": "USDX", "claimed": true, "reason": "wallet",
+  "error": "This wallet has already received its USDX from the faucet. The faucet pays each asset once per wallet. To get more, trade for it in the wallet." }
+```
+
+| `reason` | `claimed` | means |
+| --- | --- | --- |
+| `wallet` | true | the wallet's id, mailbox or Bitcoin ark address was paid this asset |
+| `address` | true | the address was paid this asset |
+| `network` | false | the IP was paid this asset in the last day; the message says in how many hours it can ask again |
+| `busy` | false | a payout to one of the same keys is being paid now |
 
 Addresses may be transparent (`tb1`, the default on Sequentia) or blinded
 (`tsqb1`). Both are funded the same way, except tSEQ paid from the drip
@@ -71,9 +136,9 @@ leaves" below):
 The wallet's next `arca sync` reads the coin from its mailbox and holds it.
 The amount is the one an on-chain request of the asset pays now (for tSEQ the
 tier in force), or the request's own value when it asks for less. The same
-limits apply: one payout per wallet (the request's mailbox key, which every
-request of a wallet carries) and per IP, per asset, in the cooldown, and an
-IP's leaf and on-chain payouts of one asset count together. Refused with a
+rule applies: once per wallet per asset (its `wallet` id and the request's
+mailbox key, which every request of a wallet carries), and per IP for a day,
+and a leaf and an on-chain payout of one asset count together. Refused with a
 `400`: a request that has lapsed or names no lapse, one for another operator
 or another chain, an asset the operator does not serve or the faucet does not
 pay as a leaf, a request naming another asset than the one asked, and anything
@@ -99,8 +164,8 @@ for an on-chain payment). The amount follows what the wallet can send now:
 | 0.001 to 0.005 | 0.0002 |
 | under 0.001 | nothing (`503`) |
 
-`GET /faucet/amount?asset=BTC` returns the amount in force. The same limits
-apply: once per cooldown per address, per ark address and per IP. The wallet is
+`GET /faucet/amount?asset=BTC` returns the amount in force. The same rule
+applies: once per wallet, address and ark address, and per IP for a day. The wallet is
 the faucet's alone; the operator keeps it topped up from the testnet4 service
 wallet (sequentia-testnet-ops, consumer `faucet-btc`). A faucet without
 `FAUCET_BTC_ARCA` answers BTC requests with a `400`.
@@ -125,7 +190,9 @@ environment variable:
 | `FAUCET_WALLET` | `treasury2026` | wallet the coins come from |
 | `FAUCET_AMOUNT` | unset | pins the tSEQ amount per request; unset, it follows the treasury balance (below) |
 | `FAUCET_BALANCE_REFRESH_MS` | `60000` | how often the treasury balance is read |
-| `FAUCET_COOLDOWN_MS` | `3600000` | per address and per IP, per asset |
+| `FAUCET_LEDGER` | `/root/sequentia/faucet-state/claims.jsonl` | the claims ledger (above); its directory is made, mode 700, when missing |
+| `FAUCET_IP_WINDOW_MS` | `86400000` | how long a payout of an asset holds back other requests for it from the same IP |
+| `FAUCET_EXEMPT_TOKEN_FILE` | unset | a file holding the token (32 characters or more) that exempts our own tooling, sent as `X-Faucet-Exempt`; unset, only loopback requests are exempt |
 | `FAUCET_DRIP` | unset | the `faucet-drip` command; set, tSEQ is paid from the drip covenant (below) |
 | `FAUCET_DRIP_INSTANCE` | unset | with `FAUCET_DRIP`: the covenant's instance file |
 | `FAUCET_DRIP_MNEMONIC` | unset | with `FAUCET_DRIP`: a file holding the mnemonic of the faucet key |
@@ -293,7 +360,9 @@ npm install
 npm test
 ```
 
-runs the request path with `FAUCET_CLI` pointed at `echo`, the drip
+runs the request path with `FAUCET_CLI` pointed at `echo` or a stand-in, the
+once-per-wallet rule (`test/once.test.js`: each key, the IP window, a restart,
+a line cut short, two requests in flight, the exemption), the drip
 covenant's path with a stand-in for the tool, and the leaf path with a
 stand-in for `arca` (`test/fake-arca.js`), so no coins move; the stand-in
 refuses a second scan while one is running, as the node does. With a built tool
@@ -308,4 +377,6 @@ FAUCET_REGTEST_BIN=/path/to/Sequentia/src FAUCET_DRIP=drip/target/debug/faucet-d
 ## Deploy
 
 `deploy/sequentia-faucet.service` is the systemd unit. The box pulls this repo
-from GitHub and runs it there; source is never edited on the server.
+from GitHub and runs it there; source is never edited on the server. The claims
+ledger lives outside the checkout, so a deploy never touches it; keep it in
+the box's backups.

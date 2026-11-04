@@ -10,6 +10,8 @@
 // reason to share a repository.
 const path = require('path')
 const express = require('express')
+const crypto = require('crypto')
+const fs = require('fs')
 const { execFile } = require('child_process')
 
 const PORT = Number(process.env.FAUCET_PORT || 9960)
@@ -18,7 +20,6 @@ const CLI = process.env.FAUCET_CLI || '/root/Sequentia/src/sequentia-cli'
 const DATADIR = process.env.FAUCET_DATADIR || '/root/seq-testnet/node000'
 const WALLET = process.env.FAUCET_WALLET || 'treasury2026'
 const FIXED_AMOUNT = process.env.FAUCET_AMOUNT || ''   // set to pin the tSEQ amount; unset, it follows the treasury
-const COOLDOWN_MS = Number(process.env.FAUCET_COOLDOWN_MS || 3600000)
 const BALANCE_REFRESH_MS = Number(process.env.FAUCET_BALANCE_REFRESH_MS || 60000)
 
 // The drip covenant. With FAUCET_DRIP set, tSEQ is paid by the drip tool from
@@ -76,7 +77,7 @@ const ADDR_RE = /^(tb1|tsqb1)[ac-hj-np-z02-9]{20,180}$/
 // Bitcoin ark (Bark's `tark1`), for BTC payouts.
 const BTC_ADDR_RE = /^tb1[ac-hj-np-z02-9]{20,90}$/
 const ARK_ADDR_RE = /^tark1[ac-hj-np-z02-9]{20,200}$/
-const { readReceiveCode } = require('./receive-code')
+const { readReceiveCode, mailboxOf } = require('./receive-code')
 
 // label -> amount. A fixed allowlist, so the asset can never be anything the
 // operator did not put here.
@@ -90,14 +91,84 @@ const { readReceiveCode } = require('./receive-code')
 // WTI oil). The amounts are fixed; they are not repriced as the market moves.
 const ASSETS = { USDX: '500000', EURX: '500000', GOLD: '125', SILVR: '10000', OILX: '5000' }
 
-const seen = new Map()                                   // key -> last-served epoch ms
-const tooSoon = k => { const t = seen.get(k); return t && (Date.now() - t) < COOLDOWN_MS }
-// Evict entries older than the cooldown so the map cannot grow without bound
-// (one key per address/IP per asset would otherwise accumulate forever).
-setInterval(() => {
-  const cutoff = Date.now() - COOLDOWN_MS
-  for (const [k, t] of seen) if (t < cutoff) seen.delete(k)
-}, COOLDOWN_MS).unref()
+// Once per wallet. Every payout is kept in the claims ledger (ledger.js), a
+// file of the faucet's own outside its checkout, under each key the request
+// carried: the wallet's id, the address, the receive request's mailbox, the
+// address on the Bitcoin ark, and the requester's IP (which counts for
+// FAUCET_IP_WINDOW_MS only). A request any of whose keys was paid the asset
+// before is refused.
+const LEDGER_FILE = process.env.FAUCET_LEDGER || '/root/sequentia/faucet-state/claims.jsonl'
+const IP_WINDOW_MS = Number(process.env.FAUCET_IP_WINDOW_MS || 86400000)
+let ledger
+try { ledger = require('./ledger').open(LEDGER_FILE, { ipWindowMs: IP_WINDOW_MS }) } catch (e) {
+  console.error(`the claims ledger ${LEDGER_FILE} cannot be opened (${e.message}): set FAUCET_LEDGER to a file this service can write`)
+  process.exit(1)
+}
+console.log(`claims ledger ${LEDGER_FILE}: ${ledger.size()} payouts`)
+const { ipKey } = require('./ledger')
+// A wallet's id: sha256("sequentia-faucet-wallet/1" || the scriptPubKey of its
+// first receive address), in hex. Every wallet made from one phrase has it.
+const WALLET_RE = /^[0-9a-f]{64}$/
+
+// Our own tooling is never refused: a request that reaches the faucet
+// directly on the loopback, with no proxy's forwarding header (the site front
+// door always adds one), or one carrying the token in FAUCET_EXEMPT_TOKEN_FILE
+// as `X-Faucet-Exempt`. Neither is checked against the ledger nor kept in it.
+const EXEMPT_TOKEN_FILE = process.env.FAUCET_EXEMPT_TOKEN_FILE || ''
+let EXEMPT_TOKEN = ''
+if (EXEMPT_TOKEN_FILE) {
+  try { EXEMPT_TOKEN = fs.readFileSync(EXEMPT_TOKEN_FILE, 'utf8').trim() } catch (e) {}
+  if (EXEMPT_TOKEN.length < 32) {
+    console.error('FAUCET_EXEMPT_TOKEN_FILE is set: it must hold a token of at least 32 characters')
+    process.exit(1)
+  }
+}
+const LOOPBACK_RE = /^(127\.|::1$|::ffff:127\.)/
+function exempt (req) {
+  const h = req.headers
+  if (!h['x-forwarded-for'] && !h.forwarded && !h['x-real-ip'] && LOOPBACK_RE.test(String(req.socket.remoteAddress || ''))) return 'local'
+  const t = h['x-faucet-exempt']
+  if (EXEMPT_TOKEN && typeof t === 'string' && t.length === EXEMPT_TOKEN.length &&
+    crypto.timingSafeEqual(Buffer.from(t), Buffer.from(EXEMPT_TOKEN))) return 'token'
+  return null
+}
+
+// What a refusal says, by the key that was paid before.
+function refusal (unit, hit, now = Date.now()) {
+  const kind = hit.key[0]
+  if (kind === 'i') {
+    const hours = Math.max(1, Math.ceil((hit.t + IP_WINDOW_MS - now) / 3600000))
+    return { reason: 'network', error: `The faucet has already paid ${unit} to a wallet on your network in the last day. It pays each asset once a day per network: try again in ${hours} hour${hours === 1 ? '' : 's'}, or trade for ${unit} in your wallet.` }
+  }
+  if (kind === 'a') return { reason: 'address', error: `This address has already received its ${unit} from the faucet. The faucet pays each asset once per wallet and address. To get more, trade for it in your wallet.` }
+  return { reason: 'wallet', error: `This wallet has already received its ${unit} from the faucet. The faucet pays each asset once per wallet. To get more, trade for it in the wallet.` }
+}
+
+// The keys of a request, the wallet's first, so that a refusal names the wallet.
+function keysOf (req, { address, mailbox, ark }) {
+  const w = String((req.body && req.body.wallet) || '').trim().toLowerCase()
+  return [w && 'w:' + w, mailbox && 'm:' + mailbox, ark && 'k:' + ark, address && 'a:' + address,
+    ipKey(String(req.ip || req.socket.remoteAddress || '').trim())].filter(Boolean)
+}
+
+// Admits a request for `unit` or answers its refusal. -> a claim to commit()
+// once the payout succeeded or release() when it failed, or null when the
+// request was answered here.
+const FREE = { commit () {}, release () {} }
+function admit (req, res, unit, keys) {
+  if (exempt(req)) return FREE
+  const hit = ledger.hit(unit, keys)
+  if (hit) {
+    res.status(429).json({ asset: unit, claimed: hit.key[0] !== 'i', ...refusal(unit, hit) })
+    return null
+  }
+  const claim = ledger.reserve(unit, keys)
+  if (claim.busy) {
+    res.status(429).json({ asset: unit, claimed: false, reason: 'busy', error: `The faucet is already paying this wallet its ${unit}. Wait a moment, then check your balance.` })
+    return null
+  }
+  return claim
+}
 
 // Last known treasury balance and the amount it implies. Refreshed on a
 // timer rather than per request, so a burst of claims costs one RPC a
@@ -212,45 +283,62 @@ app.get('/amount', (req, res) => {
   res.json({ amount: currentAmount(), asset: 'tSEQ' })
 })
 
+// Which assets a wallet (or an address) has already received from the faucet,
+// so a wallet can show it without asking for a payout.
+const ORDER = ['BTC', 'tSEQ', ...Object.keys(ASSETS)]
+app.get('/claimed', (req, res) => {
+  const wallet = String(req.query.wallet || '').trim().toLowerCase()
+  const address = String(req.query.address || '').trim()
+  if (wallet && !WALLET_RE.test(wallet)) return res.status(400).json({ error: 'The wallet id is not one this faucet reads.' })
+  if (!wallet && !address) return res.status(400).json({ error: 'Name a wallet (?wallet=<id>) or an address (?address=).' })
+  const got = new Set([...(wallet ? ledger.claimed('w:' + wallet) : []), ...(address ? ledger.claimed('a:' + address) : [])])
+  res.json({ claimed: ORDER.filter(a => got.has(a)) })
+})
+
 // A BTC payout: to the code's address on the Bitcoin ark when it has one,
-// else on chain to the address. Limited like every asset, per address and IP.
-function payBtc (req, res, address, ark, ip) {
+// else on chain to the address. Once per wallet, like every asset.
+function payBtc (req, res, address, ark, mailbox) {
   if (!btc) return res.status(400).json({ error: 'This faucet does not pay BTC.' })
   if (ark && !ARK_ADDR_RE.test(ark)) return res.status(400).json({ error: 'The receive code\'s Bitcoin ark address is not one this faucet can pay.' })
   if (!ark && !BTC_ADDR_RE.test(address)) return res.status(400).json({ error: 'BTC is paid to a receive code or to a tb1 address.' })
-  if (tooSoon('a:BTC:' + address) || tooSoon('i:BTC:' + ip) || (ark && tooSoon('k:BTC:' + ark)))
-    return res.status(429).json({ error: 'Already funded recently; please wait before requesting again.' })
+  const claim = admit(req, res, 'BTC', keysOf(req, { address, mailbox, ark }))
+  if (!claim) return
   let paying
-  try { paying = btc.pay({ address, ark }) } catch (e) { return res.status(e.status || 502).json({ error: e.message }) }
+  try { paying = btc.pay({ address, ark }) } catch (e) { claim.release(); return res.status(e.status || 502).json({ error: e.message }) }
   paying.then(p => {
-    seen.set('a:BTC:' + address, Date.now()); seen.set('i:BTC:' + ip, Date.now())
-    if (ark) seen.set('k:BTC:' + ark, Date.now())
+    claim.commit()
     res.json({ amount: p.amount, asset: 'BTC', ark: p.ark, txid: p.txid })
-  }, e => res.status(e.status || 502).json({ error: e.message }))
+  }, e => { claim.release(); res.status(e.status || 502).json({ error: e.message }) })
 }
 
 // execFile (no shell) plus a strict address regex means the user-supplied address
 // cannot inject anything; it is only ever one argv element. The optional asset is
 // checked against the allowlist above, so it is injection-safe for the same reason.
-function payFromCovenant (req, res, address, ip) {
+function payFromCovenant (req, res, address, claim) {
   // The covenant polices explicit outputs only, so it pays a transparent
   // address; paying a confidential one in the clear would override the
   // recipient's choice.
-  if (!address.startsWith('tb1'))
+  if (!address.startsWith('tb1')) {
+    claim.release()
     return res.status(400).json({ error: 'tSEQ comes from the faucet\'s reserve, which pays transparent (tb1) addresses only.' })
-  if (dripping)
+  }
+  if (dripping) {
+    claim.release()
     return res.status(429).json({ error: 'The faucet is paying another request; please try again in a moment.' })
+  }
   dripping = true
   const args = dripArgs('drip').concat(['--mnemonic-file', DRIP_MNEMONIC, '--to', address])
   Promise.resolve(checking).then(() => execFile(DRIP, args, { timeout: 60000 }, (err, stdout, stderr) => {
     dripping = false
     const why = String(stderr || (err && err.message) || '').trim().split('\n').pop()
+    if (err) claim.release()
     if (err && err.code === DRIP_TOO_EARLY)
       return res.status(429).json({ error: 'The faucet pays tSEQ from its reserve once per interval; please try again in a few minutes.' })
     if (err) return res.status(502).json({ error: why || 'faucet drip failed' })
     let r
+    // The drip went out whatever its answer says, so the claim is kept.
+    claim.commit()
     try { r = JSON.parse(stdout) } catch (e) { return res.status(502).json({ error: 'faucet drip answer unreadable' }) }
-    seen.set('a:tSEQ:' + address, Date.now()); seen.set('i:tSEQ:' + ip, Date.now())
     res.json({ txid: r.txid, amount: coins(r.amount), asset: 'tSEQ' })
     refreshTier()
   }))
@@ -258,7 +346,7 @@ function payFromCovenant (req, res, address, ip) {
 
 // A receive request, paid as a leaf. Asked for only by a wallet that hands
 // one out; the page offers none.
-function payLeaf (req, res, ip) {
+function payLeaf (req, res) {
   const text = String(req.body.request || '')
   if (req.body.address !== undefined) return res.status(400).json({ error: 'Send an address or a receive request, not both.' })
   if (!leaves) return res.status(400).json({ error: 'This faucet does not pay receive requests.' })
@@ -267,37 +355,41 @@ function payLeaf (req, res, ip) {
   const unit = asset || 'tSEQ'
   let r
   try { r = leaves.decode(text) } catch (e) { return res.status(e.status || 400).json({ error: e.message }) }
-  // The same limits as on-chain: per wallet (its mailbox key, the one key all
-  // of a wallet's requests share) and per IP, per asset, the IP's shared with
+  // The same keys as on-chain: the wallet's id, its mailbox key (the one key
+  // all of a wallet's requests share) and the IP, the IP's window shared with
   // its on-chain requests.
-  if (tooSoon('m:' + unit + ':' + r.mailbox) || tooSoon('i:' + unit + ':' + ip))
-    return res.status(429).json({ error: 'Already funded recently; please wait before requesting again.' })
+  const claim = admit(req, res, unit, keysOf(req, { mailbox: r.mailbox }))
+  if (!claim) return
   let paying
-  try { paying = leaves.pay(text, r, unit) } catch (e) { return res.status(e.status || 400).json({ error: e.message }) }
+  try { paying = leaves.pay(text, r, unit) } catch (e) { claim.release(); return res.status(e.status || 400).json({ error: e.message }) }
   paying.then(p => {
-    seen.set('m:' + unit + ':' + r.mailbox, Date.now()); seen.set('i:' + unit + ':' + ip, Date.now())
+    claim.commit()
     res.json({ amount: p.amount, asset: unit, leaf: { asset: p.asset_id, atoms: p.atoms, owner: r.owner } })
-  }, e => res.status(e.status || 502).json({ error: e.message }))
+  }, e => { claim.release(); res.status(e.status || 502).json({ error: e.message }) })
 }
 
 app.post('/', express.json({ limit: '8kb' }), (req, res) => {
-  if (req.body && req.body.request !== undefined) return payLeaf(req, res, String(req.ip || req.socket.remoteAddress || '').trim())
+  const wallet = req.body && req.body.wallet
+  if (wallet !== undefined && !(typeof wallet === 'string' && WALLET_RE.test(wallet.trim().toLowerCase())))
+    return res.status(400).json({ error: 'The wallet id is not one this faucet reads.' })
+  if (req.body && req.body.request !== undefined) return payLeaf(req, res)
   // A receive code is read for the part this faucet pays: its address, and
   // for BTC its address on the Bitcoin ark too.
   const given = String((req.body && req.body.address) || '').trim()
   const code = readReceiveCode(given)
   const address = code ? (code.address || '') : given
   const asset = String((req.body && req.body.asset) || '').trim()   // '' = native tSEQ
-  if (asset === 'BTC') return payBtc(req, res, address, code && code.ark, String(req.ip || req.socket.remoteAddress || '').trim())
+  // A receive code's own receive request names the wallet's mailbox too.
+  const mailbox = code && code.sequentia ? mailboxOf(code.sequentia) : null
+  if (asset === 'BTC') return payBtc(req, res, address, code && code.ark, mailbox)
   if (!ADDR_RE.test(address)) return res.status(400).json({ error: code ? 'That receive code names no Sequentia address.' : 'Enter a valid Sequentia address or receive code.' })
   if (asset && !Object.prototype.hasOwnProperty.call(ASSETS, asset))
     return res.status(400).json({ error: 'Unknown faucet asset.' })
   const unit = asset || 'tSEQ'
   const amount = asset ? ASSETS[asset] : currentAmount()
-  const ip = String(req.ip || req.socket.remoteAddress || '').trim()
-  if (tooSoon('a:' + unit + ':' + address) || tooSoon('i:' + unit + ':' + ip))
-    return res.status(429).json({ error: 'Already funded recently; please wait before requesting again.' })
-  if (!asset && DRIP) return payFromCovenant(req, res, address, ip)
+  const claim = admit(req, res, unit, keysOf(req, { address, mailbox }))
+  if (!claim) return
+  if (!asset && DRIP) return payFromCovenant(req, res, address, claim)
 
   // The open fee market means no asset is the default fee asset; the node requires
   // the fee asset to be NAMED. Pay it in the asset being sent (the fee-model default
@@ -307,8 +399,8 @@ app.post('/', express.json({ limit: '8kb' }), (req, res) => {
     'address=' + address, 'amount=' + amount, 'fee_rate=2', 'fee_asset_label=' + (asset || 'bitcoin')]
   if (asset) args.push('assetlabel=' + asset)
   execFile(CLI, args, { timeout: 30000 }, (err, stdout, stderr) => {
-    if (err) return res.status(502).json({ error: String(stderr || err.message).trim().split('\n').pop() || 'faucet send failed' })
-    seen.set('a:' + unit + ':' + address, Date.now()); seen.set('i:' + unit + ':' + ip, Date.now())
+    if (err) { claim.release(); return res.status(502).json({ error: String(stderr || err.message).trim().split('\n').pop() || 'faucet send failed' }) }
+    claim.commit()
     res.json({ txid: stdout.trim(), amount, asset: unit })
   })
 })
