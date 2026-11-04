@@ -119,8 +119,9 @@ test('a receive request is paid as a leaf at the tier and amounts of on-chain pa
   assert.equal(older.status, 200, JSON.stringify(older.body))
 })
 
-test('the same limits as on-chain payouts: once per wallet, and per IP for a day, the IP shared with on-chain requests', async t => {
-  const s = await start(t)
+test('the same limits as on-chain payouts: once per wallet, and per IP its count of wallets a day, the IP shared with on-chain requests', async t => {
+  // One wallet per IP, so the second wallet from an IP reaches its count.
+  const s = await start(t, { FAUCET_IP_WALLETS: '1' })
   const mailbox = 'cd'.repeat(32)
   assert.equal((await s.post({ request: request({ mailbox }) }, '10.0.1.1')).status, 200)
   // The same wallet (its mailbox key) from another IP, with a new request.

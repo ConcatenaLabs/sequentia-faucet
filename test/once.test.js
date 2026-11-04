@@ -130,20 +130,45 @@ test('a receive code\'s request names the wallet by its mailbox', async t => {
   assert.equal(again.body.reason, 'wallet')
 })
 
-test('an IP is paid each asset once per window', async t => {
-  const s = await start(t, workdir(t), { FAUCET_IP_WINDOW_MS: '1500' })
+test('an IP is paid each asset for so many different wallets per window, then told when to ask again', async t => {
+  const s = await start(t, workdir(t), { FAUCET_IP_WINDOW_MS: '1500', FAUCET_IP_WALLETS: '3' })
   const ip = '198.18.0.7'
-  assert.equal((await s.post({ wallet: W(30), address: TB1(30), asset: 'OILX' }, { ip })).status, 200)
-  const same = await s.post({ wallet: W(31), address: TB1(31), asset: 'OILX' }, { ip })
-  assert.equal(same.status, 429)
-  assert.equal(same.body.reason, 'network')
-  assert.equal(same.body.claimed, false)
-  assert.match(same.body.error, /^The faucet has already paid OILX to a wallet on your network in the last day\. .*try again in 1 hour, or trade for OILX in your wallet\.$/)
-  assert.equal((await s.post({ wallet: W(31), address: TB1(31), asset: 'USDX' }, { ip })).status, 200, 'another asset from the same IP')
+  for (let i = 0; i < 3; i++) assert.equal((await s.post({ wallet: W(30 + i), address: TB1(30 + i), asset: 'OILX' }, { ip })).status, 200, 'wallet ' + i)
+  const fourth = await s.post({ wallet: W(33), address: TB1(33), asset: 'OILX' }, { ip })
+  assert.equal(fourth.status, 429)
+  assert.equal(fourth.body.reason, 'network')
+  assert.equal(fourth.body.claimed, false)
+  assert.equal(fourth.body.error, 'The faucet has already paid OILX to 3 wallets on your network in the last day, which is as many as it pays from one network. Try again in 1 minute, or trade for OILX in your wallet.')
+  assert.ok(Date.parse(fourth.body.next) > Date.now(), 'and when, as a time: ' + fourth.body.next)
+  // A wallet already paid is refused as itself, whatever the count.
+  assert.equal((await s.post({ wallet: W(30), address: TB1(34), asset: 'OILX' }, { ip })).body.reason, 'wallet')
+  assert.equal((await s.post({ wallet: W(33), address: TB1(33), asset: 'USDX' }, { ip })).status, 200, 'another asset from the same IP')
+  // A request with no wallet id counts by its address.
+  assert.equal((await s.post({ address: TB1(35), asset: 'OILX' }, { ip })).body.reason, 'network')
   await new Promise(r => setTimeout(r, 1600))
-  assert.equal((await s.post({ wallet: W(31), address: TB1(31), asset: 'OILX' }, { ip })).status, 200, 'the window has passed')
+  assert.equal((await s.post({ wallet: W(33), address: TB1(33), asset: 'OILX' }, { ip })).status, 200, 'the window has passed')
   // An IP's window never makes the wallet's own claim lapse.
-  assert.equal((await s.post({ wallet: W(30), address: TB1(32), asset: 'OILX' })).body.reason, 'wallet')
+  assert.equal((await s.post({ wallet: W(30), address: TB1(36), asset: 'OILX' })).body.reason, 'wallet')
+})
+
+test('by default ten wallets from one network are paid, and the eleventh is told it can ask in a day', async t => {
+  const s = await start(t, workdir(t))
+  const ip = '198.18.0.9'
+  for (let i = 0; i < 10; i++) assert.equal((await s.post({ wallet: W(80 + i), address: TB1(80 + i), asset: 'GOLD' }, { ip })).status, 200, 'wallet ' + (i + 1))
+  const eleventh = await s.post({ wallet: W(90), address: TB1(90), asset: 'GOLD' }, { ip })
+  assert.equal(eleventh.status, 429)
+  assert.equal(eleventh.body.error, 'The faucet has already paid GOLD to 10 wallets on your network in the last day, which is as many as it pays from one network. Try again in 24 hours, or trade for GOLD in your wallet.')
+})
+
+test('requests in flight from one network count against it', async t => {
+  const s = await start(t, workdir(t), { FAUCET_IP_WALLETS: '2', FAKE_CLI_DELAY: '1' })
+  const ip = '198.18.0.11'
+  const r = await Promise.all([0, 1, 2].map(i => s.post({ wallet: W(95 + i), address: TB1(95 + i), asset: 'SILVR' }, { ip })))
+  assert.deepEqual(r.map(x => x.status).sort(), [200, 200, 429])
+  const refused = r.find(x => x.status === 429)
+  assert.equal(refused.body.reason, 'busy')
+  assert.match(refused.body.error, /paying SILVR to other wallets on your network right now/)
+  assert.equal((await s.post({ wallet: W(98), address: TB1(98), asset: 'SILVR' }, { ip })).body.reason, 'network', 'once both are paid, the count is reached')
 })
 
 test('the ledger survives a restart, and a line cut short by a crash', async t => {
@@ -232,4 +257,16 @@ test('a token file that holds no token stops the faucet', async t => {
     stdio: 'ignore'
   })
   assert.equal(await new Promise(resolve => child.once('exit', resolve)), 1)
+})
+
+test('an IP\'s count survives a restart', async t => {
+  const dir = workdir(t)
+  let s = await start(t, dir, { FAUCET_IP_WALLETS: '2' })
+  const ip = '198.18.0.13'
+  for (let i = 0; i < 2; i++) assert.equal((await s.post({ wallet: W(60 + i), address: TB1(60 + i), asset: 'EURX' }, { ip })).status, 200)
+  await s.stop()
+  s = await start(t, dir, { FAUCET_IP_WALLETS: '2' })
+  const r = await s.post({ wallet: W(62), address: TB1(62), asset: 'EURX' }, { ip })
+  assert.equal(r.body.reason, 'network')
+  assert.match(r.body.error, /to 2 wallets on your network in the last day.*Try again in 24 hours/)
 })
