@@ -46,8 +46,9 @@ fallback to a default fee asset would be a privilege, and privileges are bugs.
 
 **Each asset is paid once per wallet, and the keys must keep working.** Every
 payout is kept in the claims ledger under the wallet's id, the address, the
-receive request's mailbox, the Bitcoin ark address and the IP (the IP's for a
-day), and a request any of whose keys was paid that asset is refused. A claim
+receive request's mailbox, the Bitcoin ark address and the IP, and a request
+any of whose keys was paid that asset is refused; an IP only once it was paid
+the asset for ten different wallets in a day, counting payouts in flight. A claim
 is written only after its payout succeeded and before the answer, and a key in
 flight refuses the same asset to every other request. The service sits behind
 one trusted proxy, which forwards the original `X-Forwarded-For`, so `trust

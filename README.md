@@ -39,10 +39,17 @@ request carried:
 | the address | the address paid, or a receive code's address |
 | the wallet's mailbox | the receive request's `mailbox`, the same in every request one wallet makes, whether sent as `request` or inside a receive code |
 | the Bitcoin ark address | a receive code's `ark` part, for BTC |
-| the requester's IP | counted for a day only (`FAUCET_IP_WINDOW_MS`) |
+| the requester's IP | counted by wallets, for a day only: up to ten different wallets per asset (`FAUCET_IP_WALLETS`, `FAUCET_IP_WINDOW_MS`) |
 
-A request is refused with a `429` when any of its keys was paid that asset
-before (an IP's within the day). The ledger is a file outside the checkout,
+A request is refused with a `429` when any of its keys but the IP was paid
+that asset before. An IP is refused an asset once it has been paid it for ten
+different wallets in the last day, so a shared network (a meetup, an office)
+funds ten wallets, and a script pasting fresh addresses gets no further; a
+wallet here is the request's wallet id, or its mailbox, ark address or address
+when it sends none. The refusal then says when the next request from that
+network can be paid. Payouts in flight count against the IP too.
+
+The ledger is a file outside the checkout,
 read when the faucet starts and written, and flushed to disk, before it
 answers, so a restart or a deploy forgets nothing. A payout is recorded only
 once it succeeded, and while one is being paid, any other request for the same
@@ -109,7 +116,7 @@ in words a person can act on, and in `reason`:
 | --- | --- | --- |
 | `wallet` | true | the wallet's id, mailbox or Bitcoin ark address was paid this asset |
 | `address` | true | the address was paid this asset |
-| `network` | false | the IP was paid this asset in the last day; the message says in how many hours it can ask again |
+| `network` | false | the IP was paid this asset for ten different wallets in the last day; the message says how long until it can ask again, and `next` gives that time |
 | `busy` | false | a payout to one of the same keys is being paid now |
 
 Addresses may be transparent (`tb1`, the default on Sequentia) or blinded
@@ -137,7 +144,7 @@ The wallet's next `arca sync` reads the coin from its mailbox and holds it.
 The amount is the one an on-chain request of the asset pays now (for tSEQ the
 tier in force), or the request's own value when it asks for less. The same
 rule applies: once per wallet per asset (its `wallet` id and the request's
-mailbox key, which every request of a wallet carries), and per IP for a day,
+mailbox key, which every request of a wallet carries), and per IP by its count,
 and a leaf and an on-chain payout of one asset count together. Refused with a
 `400`: a request that has lapsed or names no lapse, one for another operator
 or another chain, an asset the operator does not serve or the faucet does not
@@ -165,7 +172,7 @@ for an on-chain payment). The amount follows what the wallet can send now:
 | under 0.001 | nothing (`503`) |
 
 `GET /faucet/amount?asset=BTC` returns the amount in force. The same rule
-applies: once per wallet, address and ark address, and per IP for a day. The wallet is
+applies: once per wallet, address and ark address, and per IP by its count. The wallet is
 the faucet's alone; the operator keeps it topped up from the testnet4 service
 wallet (sequentia-testnet-ops, consumer `faucet-btc`). A faucet without
 `FAUCET_BTC_ARCA` answers BTC requests with a `400`.
@@ -191,7 +198,8 @@ environment variable:
 | `FAUCET_AMOUNT` | unset | pins the tSEQ amount per request; unset, it follows the treasury balance (below) |
 | `FAUCET_BALANCE_REFRESH_MS` | `60000` | how often the treasury balance is read |
 | `FAUCET_LEDGER` | `/root/sequentia/faucet-state/claims.jsonl` | the claims ledger (above); its directory is made, mode 700, when missing |
-| `FAUCET_IP_WINDOW_MS` | `86400000` | how long a payout of an asset holds back other requests for it from the same IP |
+| `FAUCET_IP_WALLETS` | `10` | how many different wallets one IP is paid each asset for in the window |
+| `FAUCET_IP_WINDOW_MS` | `86400000` | the window an IP's count of wallets is kept for |
 | `FAUCET_EXEMPT_TOKEN_FILE` | unset | a file holding the token (32 characters or more) that exempts our own tooling, sent as `X-Faucet-Exempt`; unset, only loopback requests are exempt |
 | `FAUCET_DRIP` | unset | the `faucet-drip` command; set, tSEQ is paid from the drip covenant (below) |
 | `FAUCET_DRIP_INSTANCE` | unset | with `FAUCET_DRIP`: the covenant's instance file |

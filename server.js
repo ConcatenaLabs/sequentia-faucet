@@ -94,13 +94,14 @@ const ASSETS = { USDX: '500000', EURX: '500000', GOLD: '125', SILVR: '10000', OI
 // Once per wallet. Every payout is kept in the claims ledger (ledger.js), a
 // file of the faucet's own outside its checkout, under each key the request
 // carried: the wallet's id, the address, the receive request's mailbox, the
-// address on the Bitcoin ark, and the requester's IP (which counts for
-// FAUCET_IP_WINDOW_MS only). A request any of whose keys was paid the asset
-// before is refused.
+// address on the Bitcoin ark, and the requester's IP. A request any of whose
+// keys was paid the asset before is refused, an IP's only once it was paid the
+// asset for FAUCET_IP_WALLETS different wallets in FAUCET_IP_WINDOW_MS.
 const LEDGER_FILE = process.env.FAUCET_LEDGER || '/root/sequentia/faucet-state/claims.jsonl'
 const IP_WINDOW_MS = Number(process.env.FAUCET_IP_WINDOW_MS || 86400000)
+const IP_WALLETS = Number(process.env.FAUCET_IP_WALLETS || 10)
 let ledger
-try { ledger = require('./ledger').open(LEDGER_FILE, { ipWindowMs: IP_WINDOW_MS }) } catch (e) {
+try { ledger = require('./ledger').open(LEDGER_FILE, { ipWindowMs: IP_WINDOW_MS, ipWallets: IP_WALLETS }) } catch (e) {
   console.error(`the claims ledger ${LEDGER_FILE} cannot be opened (${e.message}): set FAUCET_LEDGER to a file this service can write`)
   process.exit(1)
 }
@@ -133,12 +134,19 @@ function exempt (req) {
   return null
 }
 
+// How long until `ms` from now, in words: "in 5 hours", "in 40 minutes".
+function waitWords (ms) {
+  if (ms > 3600000) { const h = Math.ceil(ms / 3600000); return `in ${h} hours` }
+  const m = Math.max(1, Math.ceil(ms / 60000))
+  return `in ${m} minute${m === 1 ? '' : 's'}`
+}
+
 // What a refusal says, by the key that was paid before.
 function refusal (unit, hit, now = Date.now()) {
   const kind = hit.key[0]
   if (kind === 'i') {
-    const hours = Math.max(1, Math.ceil((hit.t + IP_WINDOW_MS - now) / 3600000))
-    return { reason: 'network', error: `The faucet has already paid ${unit} to a wallet on your network in the last day. It pays each asset once a day per network: try again in ${hours} hour${hours === 1 ? '' : 's'}, or trade for ${unit} in your wallet.` }
+    const wallets = `${IP_WALLETS} wallet${IP_WALLETS === 1 ? '' : 's'}`
+    return { reason: 'network', next: new Date(hit.next).toISOString(), error: `The faucet has already paid ${unit} to ${wallets} on your network in the last day, which is as many as it pays from one network. Try again ${waitWords(hit.next - now)}, or trade for ${unit} in your wallet.` }
   }
   if (kind === 'a') return { reason: 'address', error: `This address has already received its ${unit} from the faucet. The faucet pays each asset once per wallet and address. To get more, trade for it in your wallet.` }
   return { reason: 'wallet', error: `This wallet has already received its ${unit} from the faucet. The faucet pays each asset once per wallet. To get more, trade for it in the wallet.` }
@@ -164,7 +172,10 @@ function admit (req, res, unit, keys) {
   }
   const claim = ledger.reserve(unit, keys)
   if (claim.busy) {
-    res.status(429).json({ asset: unit, claimed: false, reason: 'busy', error: `The faucet is already paying this wallet its ${unit}. Wait a moment, then check your balance.` })
+    const error = claim.busy.startsWith('i:')
+      ? `The faucet is paying ${unit} to other wallets on your network right now. Wait a moment, then try again.`
+      : `The faucet is already paying this wallet its ${unit}. Wait a moment, then check your balance.`
+    res.status(429).json({ asset: unit, claimed: false, reason: 'busy', error })
     return null
   }
   return claim
