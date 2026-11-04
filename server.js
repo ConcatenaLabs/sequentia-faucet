@@ -81,14 +81,14 @@ const { readReceiveCode } = require('./receive-code')
 // label -> amount. A fixed allowlist, so the asset can never be anything the
 // operator did not put here.
 //
-// USDX and EURX are not like the others. They are the currencies the platforms on
-// this testnet price things in, so what the faucet hands out is the ceiling on
-// what anyone can demonstrate: a fee schedule written for a six-figure raise
-// cannot be exercised with ten dollars, and an escrow funded with ten dollars
-// makes every percentage of it look absurd. Each pays enough to fund a realistic
-// subscription. The others are commodity tokens, held to be seen and moved, and
-// ten of each is the right amount of those.
-const ASSETS = { USDX: '500000', EURX: '500000', GOLD: '10', SILVR: '10', OILX: '10' }
+// What the faucet hands out is the ceiling on what anyone can demonstrate: a fee
+// schedule written for a six-figure raise cannot be exercised with ten dollars,
+// and an escrow funded with ten dollars makes every percentage of it look absurd.
+// So each asset pays about the same value, enough to fund a realistic
+// subscription: 500,000 of the currencies (USDX, EURX), and of each commodity
+// token a round amount worth about as much at its market price (gold, silver and
+// WTI oil). The amounts are fixed; they are not repriced as the market moves.
+const ASSETS = { USDX: '500000', EURX: '500000', GOLD: '125', SILVR: '10000', OILX: '5000' }
 
 const seen = new Map()                                   // key -> last-served epoch ms
 const tooSoon = k => { const t = seen.get(k); return t && (Date.now() - t) < COOLDOWN_MS }

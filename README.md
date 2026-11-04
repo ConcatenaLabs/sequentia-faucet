@@ -5,11 +5,22 @@ GOLD, SILVR, OILX), sent to a wallet's receive code or to any Sequentia address,
 so they can be used from the web wallet, from a full node or from any Sequentia
 wallet.
 
-USDX and EURX, the test dollar and the test euro, are the currencies the
-platforms here price things in, so they are handed out in the amounts those
-platforms deal in rather than in samples: 500,000 a request, so a raise that the
-fee schedule was written for is fundable from this page. The other assets are
-commodity tokens, sent in tens so they can be seen and moved.
+Every asset is handed out in the amounts the platforms here deal in rather than
+in samples, so a raise that their fee schedules were written for is fundable
+from this page. Each request pays about the same value: 500,000 of USDX and EURX
+(the test dollar and the test euro), and of each commodity token a round amount
+worth about as much at its market price.
+
+| asset | per request |
+| --- | --- |
+| USDX | 500,000 |
+| EURX | 500,000 |
+| GOLD | 125 |
+| SILVR | 10,000 |
+| OILX | 5,000 |
+
+The amounts are fixed, not repriced as the market moves. tSEQ follows its own
+table (below).
 
 Live at [sequentiatestnet.com/faucet](https://sequentiatestnet.com/faucet).
 
