@@ -5,10 +5,11 @@ GOLD, SILVR, OILX), sent to a wallet's receive code or to any Sequentia address,
 so they can be used from the web wallet, from a full node or from any Sequentia
 wallet.
 
-USDX is the settlement currency the platforms here price things in, so it is
-handed out in the amounts those platforms deal in rather than in samples: a raise
-that the fee schedule was written for has to be fundable from this page. The
-other assets are commodity tokens, sent in tens so they can be seen and moved.
+USDX and EURX, the test dollar and the test euro, are the currencies the
+platforms here price things in, so they are handed out in the amounts those
+platforms deal in rather than in samples: 500,000 a request, so a raise that the
+fee schedule was written for is fundable from this page. The other assets are
+commodity tokens, sent in tens so they can be seen and moved.
 
 Live at [sequentiatestnet.com/faucet](https://sequentiatestnet.com/faucet).
 
