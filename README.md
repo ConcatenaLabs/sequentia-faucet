@@ -117,7 +117,8 @@ environment variable:
 | `FAUCET_DRIP` | unset | the `faucet-drip` command; set, tSEQ is paid from the drip covenant (below) |
 | `FAUCET_DRIP_INSTANCE` | unset | with `FAUCET_DRIP`: the covenant's instance file |
 | `FAUCET_DRIP_MNEMONIC` | unset | with `FAUCET_DRIP`: a file holding the mnemonic of the faucet key |
-| `FAUCET_DRIP_TEMPLATE` | unset | with `FAUCET_DRIP`: the template directory; unset, the one the tool was built with |
+| `FAUCET_DRIP_TEMPLATE` | unset | with `FAUCET_DRIP`: the template directory; unset, the one in Cargo's cache (below) |
+| `SEQC_HELPERS` | unset | with `FAUCET_DRIP`: the helpers directory the template includes; unset, the one in Cargo's cache (below) |
 | `FAUCET_LEAF_ARCA` | unset | the `arca` command line; set, receive requests are paid as leaves (below) |
 | `FAUCET_LEAF_DATADIR` | unset | with `FAUCET_LEAF_ARCA`: the leaf wallet's directory |
 | `FAUCET_LEAF_OPERATOR` | unset | with `FAUCET_LEAF_ARCA`: the operator key the leaf wallet must be on; a request for another operator is refused |
@@ -183,6 +184,24 @@ no wallet and no transaction index, and signs with the faucet key alone.
 cargo build --release --locked --manifest-path drip/Cargo.toml
 drip/target/release/faucet-drip <command> ...
 ```
+
+The tool reads the `faucet_drip` template, and the helpers it includes, at run
+time. Unset, it reads them from Cargo's checkout of `sequentia-contracts` at the
+commit `drip/Cargo.lock` pins, and Cargo's cache cleaning deletes a checkout no
+build has used for a month, after which every drip fails with "descriptor.json:
+No such file". A deployment therefore keeps a git checkout of that commit of its
+own and points the faucet at it:
+
+```
+REV=$(sed -n 's/^source = "git+https:\/\/github.com\/ConcatenaLabs\/sequentia-contracts?rev=[0-9a-f]*#\([0-9a-f]*\)"$/\1/p' drip/Cargo.lock)
+git clone https://github.com/ConcatenaLabs/sequentia-contracts /root/sequentia/sequentia-contracts-faucet
+git -C /root/sequentia/sequentia-contracts-faucet checkout --detach "$REV"
+```
+
+with `FAUCET_DRIP_TEMPLATE=/root/sequentia/sequentia-contracts-faucet/templates/faucet_drip`
+and `SEQC_HELPERS=/root/sequentia/sequentia-contracts-faucet/helpers` in the
+faucet's environment. When `drip/Cargo.lock` moves to another commit, check the
+checkout out at that commit too.
 
 | command | does |
 | --- | --- |
