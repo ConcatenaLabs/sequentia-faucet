@@ -1,0 +1,42 @@
+# The faucet's tests on every pull request and on main: the drip tool is built first, so the
+# test that makes a new key with it runs too. Node 18 and Rust 1.97.1 are what the testnet
+# server runs the faucet on and builds the tool with.
+#
+# Not run here, by design (README, "Testing"):
+# - SKIPPED (needs a sequentiad): test/drip.regtest.test.js, which wants FAUCET_REGTEST_BIN.
+name: tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_TERM_COLOR: always
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: drip -> target
+      - name: build the drip tool
+        run: cargo build --locked --manifest-path drip/Cargo.toml
+      - name: drip tool tests
+        run: cargo test --locked --manifest-path drip/Cargo.toml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: npm
+      - run: npm ci
+      - name: npm test
+        env:
+          FAUCET_DRIP: drip/target/debug/faucet-drip
+        run: npm test
