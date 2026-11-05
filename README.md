@@ -382,6 +382,9 @@ cargo build --manifest-path drip/Cargo.toml
 FAUCET_REGTEST_BIN=/path/to/Sequentia/src FAUCET_DRIP=drip/target/debug/faucet-drip npm test
 ```
 
+CI (`.github/workflows/tests.yml`) builds the tool and runs `npm test` with `FAUCET_DRIP` on
+every pull request and on `main`; the local-chain test needs a node and is not run there.
+
 ## Deploy
 
 `deploy/sequentia-faucet.service` is the systemd unit. The box pulls this repo
