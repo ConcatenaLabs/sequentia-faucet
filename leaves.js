@@ -11,7 +11,12 @@
 // apart here), which reads its mailbox, moves its boards and refreshes its
 // coins before their exit deadline, so the wallet keeps itself alive.
 //
-// Only one `arca` command runs at a time: the wallet is one store.
+// Only one `arca` command runs at a time: the wallet is one store. A payout
+// goes before the wallet's upkeep: it waits at most for the one upkeep
+// command already running, never for upkeep queued behind it, and a sync
+// (the one long upkeep command) does not start while payouts wait or within
+// `payQuietMs` of the last one, since a wallet asks for several assets in a
+// row. Payouts asked together wait their turn rather than being refused.
 const { execFile } = require('child_process')
 
 const HEX64 = /^[0-9a-f]{64}$/
@@ -28,7 +33,7 @@ function toCoins (atoms) {
 }
 
 // A refusal for the caller, with its HTTP status.
-const refuse = (status, error) => Object.assign(new Error(error), { status })
+const refuse = (status, error, reason) => Object.assign(new Error(error), reason ? { status, reason } : { status })
 
 // A receive request as a wallet hands it out: a prefix word, a colon, and the
 // hex of its JSON, which says it is one (`kind: "request"`, or, made by an
@@ -54,6 +59,7 @@ function decode (text) {
 
 function init (cfg) {
   const { arca, datadir, operator, assets, amountFor, syncMinMs = 60000, syncMaxMs = 3600000, low = 5, board = 20, log = console } = cfg
+  const { payQuietMs = 10000, maxWaiting = 20, now = Date.now } = cfg
   const run = (args, timeout = 120000) => new Promise(resolve => {
     execFile(arca, ['--datadir', datadir, ...args], { timeout, maxBuffer: 1 << 24 }, (err, stdout, stderr) => {
       let out = null
@@ -61,10 +67,36 @@ function init (cfg) {
       resolve({ err, out, stderr: String(stderr || '') })
     })
   })
-  // One command at a time, in the order asked.
-  let queue = Promise.resolve()
-  const serial = f => { const p = queue.then(f, f); queue = p.catch(() => {}); return p }
-  let busy = false
+  // One command at a time, payouts first. Each job is { f, what, at, ok, no };
+  // `doing` is the job running now, with when it started.
+  const payouts = []
+  const upkeeps = []
+  let doing = null
+  let lastPaid = 0
+  let later = null
+  const secs = ms => (ms / 1000).toFixed(1)
+  function pump () {
+    if (doing) return
+    let job = payouts.shift()
+    if (!job && upkeeps.length) {
+      // A sync waits for a quiet moment: no payout waiting, none just made.
+      const quiet = upkeeps[0].long ? lastPaid + payQuietMs - now() : 0
+      if (quiet > 0) {
+        if (!later) { later = setTimeout(() => { later = null; pump() }, quiet); later.unref() }
+        return
+      }
+      job = upkeeps.shift()
+    }
+    if (!job) return
+    doing = { ...job, started: now() }
+    Promise.resolve().then(() => job.f(doing)).then(job.ok, job.no).finally(() => {
+      if (job.payout) lastPaid = now()
+      doing = null
+      pump()
+    })
+  }
+  const queue = (list, job) => new Promise((ok, no) => { list.push({ ...job, at: now(), ok, no }); pump() })
+  const upkeep = (what, f, long = false) => queue(upkeeps, { what, f, long })
 
   // What the leaf wallet last said of itself: its chain, its operator, the
   // chain's median time, and the assets the operator serves now.
@@ -90,49 +122,64 @@ function init (cfg) {
 
   // Keeps each asset's leaves at `low` payouts or more, boarding `board`
   // payouts from the wallet's on-chain coins when it has them. A board waits
-  // for its transaction to be final before its coin can pay, so an asset
-  // with a board pending is left alone. Returns true while an asset is low:
-  // a board is pending, or one is waiting for on-chain coins. The wallet's
-  // own schedule says nothing of either, so the faucet looks again soon
-  // rather than at its longest interval.
+  // for its transaction to be final, which a sync sees, before its coin can
+  // pay, so an asset with a board pending is left alone. -> { boarding, short }:
+  // whether a board is pending (the next sync comes soon, to take it up) and
+  // whether an asset is low with too few on-chain coins to board (its balance
+  // is read again soon, with no sync: on-chain coins show without one).
   const short = new Set()
   async function topUp () {
-    if (!low || !board) return false
+    const res = { boarding: false, short: false }
+    if (!low || !board) return res
     // The leaf wallet's own balance only: Bark, which holds the Bitcoin side,
     // lets one process at a time open its wallet, and btc.js runs it.
-    const r = await run(['balance', '--without-bitcoin'])
-    if (!r.out || r.out.error) { log.error('leaf wallet balance: ' + ((r.out && r.out.error && r.out.error.message) || r.stderr.trim())); return true }
-    let wanting = false
+    const r = await upkeep('balance', () => run(['balance', '--without-bitcoin']))
+    if (!r.out || r.out.error) { log.error('leaf wallet balance: ' + ((r.out && r.out.error && r.out.error.message) || r.stderr.trim())); res.short = true; return res }
     for (const [label, id] of assets) {
       let pay
       try { pay = BigInt(toAtoms(amountFor(label))) } catch (e) { continue }
       const held = (r.out.arca && r.out.arca[id]) || {}
       const spendable = BigInt(held.live || 0) + BigInt(held['operator-confirmed'] || 0)
       if (spendable >= pay * BigInt(low)) { short.delete(label); continue }
-      wanting = true
-      if (BigInt(held.pending || 0) > 0n) continue
+      if (BigInt(held.pending || 0) > 0n) { res.boarding = true; continue }
       const onchain = BigInt((r.out.sequentia_onchain && r.out.sequentia_onchain[id]) || 0)
       // What is left on the chain pays the board's fee, in the asset boarded.
       const amount = [pay * BigInt(board), onchain * 9n / 10n].reduce((a, b) => (a < b ? a : b))
       if (amount < pay) {
+        res.short = true
         // Said once, not at every look.
         if (!short.has(label)) log.error(`leaf wallet: ${label} in leaves is ${toCoins(spendable)} and its on-chain coins (${toCoins(onchain)}) cannot board more; fund ${datadir} on-chain`)
         short.add(label)
         continue
       }
       short.delete(label)
-      const b = await run(['board', id, amount.toString()])
-      if (!b.out || b.out.error) log.error(`leaf wallet: boarding ${toCoins(amount)} ${label}: ${(b.out && b.out.error && b.out.error.message) || b.stderr.trim()}`)
-      else log.log(`leaf wallet: boarded ${toCoins(amount)} ${label}`)
+      const b = await upkeep('board', () => run(['board', id, amount.toString()]))
+      if (!b.out || b.out.error) { res.short = true; log.error(`leaf wallet: boarding ${toCoins(amount)} ${label}: ${(b.out && b.out.error && b.out.error.message) || b.stderr.trim()}`) }
+      else { res.boarding = true; log.log(`leaf wallet: boarded ${toCoins(amount)} ${label}`) }
     }
-    return wanting
+    return res
   }
 
-  // One sync, the wallet's info and a top-up; when the next sync is due.
+  // The wallet's upkeep, one pass: a sync when one is due, its info, and a
+  // top-up; -> how long until the next pass. A sync is due on the library's
+  // schedule (`schedule.next_sync_at`), and within `syncMinMs` while a board
+  // waits to be taken up; an asset too short to board only has its balance
+  // read again at that pace.
+  let nextSync = 0
   async function tick () {
-    let wait = syncMaxMs
-    await serial(async () => {
-      const s = await run(['sync'], 600000)
+    if (now() >= nextSync) {
+      let wait = syncMaxMs
+      const s = await upkeep('sync', async () => {
+        const t = now()
+        const r = await run(['sync'], 600000)
+        const took = now() - t
+        if (took > 20000) {
+          const steps = Object.entries((r.out && r.out.cost_by_step) || {}).map(([k, v]) => [k, (v && v.ms) || v]).filter(([, ms]) => Number(ms) >= 1000)
+            .sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, ms]) => `${k} ${secs(ms)} s`).join(', ')
+          log.log(`leaf wallet: sync took ${secs(took)} s${steps ? ' (' + steps + ')' : ''}`)
+        }
+        return r
+      }, true)
       if (s.out && s.out.schedule) {
         const sc = s.out.schedule
         if (sc.next_sync_at !== null && sc.next_sync_at !== undefined && sc.now) wait = (sc.next_sync_at - sc.now) * 1000
@@ -142,11 +189,15 @@ function init (cfg) {
         log.error('leaf wallet sync: ' + ((s.out && s.out.error && s.out.error.message) || s.stderr.trim().split('\n').pop()))
         wait = syncMinMs
       }
-      await readInfo()
-      if (await topUp()) wait = Math.min(wait, syncMinMs)
-    })
+      nextSync = now() + Math.min(Math.max(wait, syncMinMs), syncMaxMs)
+    }
+    await upkeep('info', readInfo)
+    const t = await topUp()
+    if (t.boarding) nextSync = Math.min(nextSync, now() + syncMinMs)
+    let wait = nextSync - now()
+    if (t.short) wait = Math.min(wait, syncMinMs)
     wait = Math.min(Math.max(wait, syncMinMs), syncMaxMs)
-    state.next = Date.now() + wait
+    state.next = now() + wait
     return wait
   }
 
@@ -177,25 +228,36 @@ function init (cfg) {
   }
 
   // Pays the request, out of round. The wallet checks it all again (the
-  // lapse against the chain, the operator, the asset) before it signs.
+  // lapse against the chain, the operator, the asset) before it signs. A
+  // payout asked while another runs, or while the upkeep runs a command,
+  // waits its turn; past `maxWaiting` payouts waiting, it is refused with a
+  // 429 whose `reason` is `busy`. Every payout is logged with how long it
+  // waited, behind what, and how long the send took.
   function pay (text, req, label) {
     const { id, atoms } = check(req, label)
-    if (busy) throw refuse(429, 'The faucet is paying another request; please try again in a moment.')
-    busy = true
-    return serial(async () => {
-      try {
+    if (payouts.length >= maxWaiting) throw refuse(429, 'The faucet has many requests waiting; please try again in a minute.', 'busy')
+    const behind = doing ? `${doing.what} (running ${secs(now() - doing.started)} s)` : 'nothing'
+    const waiting = payouts.length
+    return queue(payouts, {
+      what: 'send',
+      payout: true,
+      f: async job => {
+        const waited = job.started - job.at
+        const t = now()
         const r = await run(['send', text, '--amount', atoms, '--asset', id])
+        const timing = `waited ${secs(waited)} s behind ${behind}${waiting ? ` and ${waiting} payout(s)` : ''}, sent in ${secs(now() - t)} s`
         if (r.out && !r.out.error) {
-          log.log(`leaf wallet: paid ${toCoins(atoms)} ${label} into a receive request of owner ${req.owner}`)
+          log.log(`leaf wallet: paid ${toCoins(atoms)} ${label} into a receive request of owner ${req.owner} (${timing})`)
           return { asset: label, asset_id: id, amount: toCoins(atoms), atoms, payment: r.out }
         }
         const e = (r.out && r.out.error) || { message: r.stderr.trim().split('\n').pop() || 'the leaf wallet did not answer' }
         const m = String(e.message || '')
+        log.error(`leaf wallet: not paid ${toCoins(atoms)} ${label} into a receive request of owner ${req.owner} (${timing}): ${m}`)
         if (/lapsed/.test(m) || e.code === 'request_lapsed') throw refuse(400, m)
         if (/not enough|insufficient|no coin|in live coins/i.test(m)) throw refuse(503, `The faucet has no ${label} in leaves to pay now; please try again later.`)
         if (e.kind === 'server_refused' && e.status >= 400 && e.status < 500) throw refuse(400, m)
         throw refuse(502, m)
-      } finally { busy = false }
+      }
     })
   }
 

@@ -254,6 +254,8 @@ const leaves = LEAF_ARCA ? require('./leaves').init({
   amountFor: label => (label === 'tSEQ' ? currentAmount() : ASSETS[label]),
   syncMinMs: Number(process.env.FAUCET_LEAF_SYNC_MIN_MS || 60000),
   syncMaxMs: Number(process.env.FAUCET_LEAF_SYNC_MAX_MS || 3600000),
+  payQuietMs: Number(process.env.FAUCET_LEAF_PAY_QUIET_MS ?? 10000),
+  maxWaiting: Number(process.env.FAUCET_LEAF_MAX_WAITING || 20),
   low: Number(process.env.FAUCET_LEAF_LOW ?? 5),
   board: Number(process.env.FAUCET_LEAF_BOARD ?? 20)
 }) : null
@@ -372,7 +374,7 @@ function payLeaf (req, res) {
   const claim = admit(req, res, unit, keysOf(req, { mailbox: r.mailbox }))
   if (!claim) return
   let paying
-  try { paying = leaves.pay(text, r, unit) } catch (e) { claim.release(); return res.status(e.status || 400).json({ error: e.message }) }
+  try { paying = leaves.pay(text, r, unit) } catch (e) { claim.release(); return res.status(e.status || 400).json({ error: e.message, ...(e.reason ? { asset: unit, claimed: false, reason: e.reason } : {}) }) }
   paying.then(p => {
     claim.commit()
     res.json({ amount: p.amount, asset: unit, leaf: { asset: p.asset_id, atoms: p.atoms, owner: r.owner } })

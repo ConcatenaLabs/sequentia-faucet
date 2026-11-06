@@ -11,6 +11,10 @@
 //   FAKE_ARCA_LIVE      what its wallet holds of X in leaves at first (atoms)
 //   FAKE_ARCA_SEND_MEDIAN  the median time a send checks a lapse against, when
 //                       the chain has moved on since the faucet's last reading
+//   FAKE_ARCA_SYNC_MS, FAKE_ARCA_SEND_MS  how long a sync and a send take
+//
+// Each command is also written to <state>.times with when it started and
+// ended (milliseconds), for the tests of what waits for what.
 const fs = require('node:fs')
 const stateFile = process.env.FAKE_ARCA_STATE
 const X = '750627c5778222a49fc785933f4636964f010092b460b9bd16bf8c424e14366f'
@@ -20,6 +24,9 @@ const args = process.argv.slice(2)
 if (args[0] !== '--datadir') { process.stderr.write('no --datadir\n'); process.exit(2) }
 const [command, ...rest] = args.slice(2)
 fs.appendFileSync(stateFile + '.log', JSON.stringify([command, ...rest]) + '\n')
+const began = Date.now()
+process.on('exit', () => fs.appendFileSync(stateFile + '.times', JSON.stringify({ command, began, ended: Date.now() }) + '\n'))
+const sleep = ms => { if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
 let state
 try { state = JSON.parse(fs.readFileSync(stateFile, 'utf8')) } catch (e) { state = { live: { [X]: process.env.FAKE_ARCA_LIVE || '100000000000000' }, onchain: { [X]: '100000000000000' }, pending: {} } }
 const save = () => fs.writeFileSync(stateFile, JSON.stringify(state))
@@ -51,6 +58,7 @@ if (command === 'bitcoin') {
     server_info: { assets: [{ asset: X, min_leaf: '1000' }, { asset: Y, min_leaf: '1000' }] }
   })
 } else if (command === 'sync') {
+  sleep(Number(process.env.FAKE_ARCA_SYNC_MS || 0))
   // A pending board is final by the next sync.
   for (const [a, v] of Object.entries(state.pending)) state.live[a] = (BigInt(state.live[a] || 0) + BigInt(v)).toString()
   state.pending = {}
@@ -72,6 +80,7 @@ if (command === 'bitcoin') {
   save()
   out({ leaf_id: 'b'.repeat(64), state: 'pending' })
 } else if (command === 'send') {
+  sleep(Number(process.env.FAKE_ARCA_SEND_MS || 0))
   const [request, , amount, , asset] = rest
   const r = JSON.parse(Buffer.from(request.slice(request.indexOf(':') + 1), 'hex').toString())
   const now = Number(process.env.FAKE_ARCA_SEND_MEDIAN || median)
