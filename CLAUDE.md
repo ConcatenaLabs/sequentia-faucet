@@ -93,7 +93,9 @@ others there too. The leaf wallet is never the drip covenant's reserve nor the
 treasury. Arca is not named on any public page: the page offers addresses
 only, and a leaf is paid only to a wallet that sends a receive request. Every
 `arca` command runs through `execFile`, the request as one argv element, one
-command at a time, since the wallet is one store.
+command at a time, since the wallet is one store. A payout goes before the
+wallet's upkeep and never waits behind a queued sync, since a person is
+watching for it.
 
 ## Deploy
 

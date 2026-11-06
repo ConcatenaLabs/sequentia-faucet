@@ -205,15 +205,19 @@ test('the leaf wallet syncs on its schedule, boards when low and refuses work on
   assert.equal(other.commands().filter(c => c[0] === 'send').length, 0)
 })
 
-test('a low asset is looked at again soon, not at the schedule\'s longest wait, and boarded once its coins arrive', async t => {
+test('a low asset is looked at again soon, without a sync, and boarded once its coins arrive', async t => {
   const s = await start(t, { FAUCET_LEAF_SYNC_MIN_MS: '100', FAUCET_LEAF_SYNC_MAX_MS: '60000', FAKE_ARCA_NEXT: '3600' })
   await new Promise(r => setTimeout(r, 700))
   // The wallet's schedule asks for its next sync in an hour; USDX is short, so
-  // the faucet looks again at its shortest interval, and says so only once.
-  const syncs = s.commands().filter(c => c[0] === 'sync').length
-  assert.ok(syncs >= 3, `synced ${syncs} times`)
+  // the faucet reads its balance again at its shortest interval, and says so
+  // only once. Coins sent on the chain show in the balance with no sync, so it
+  // does not sync for them: the sync is the long command a payout would wait for.
+  const balances = s.commands().filter(c => c[0] === 'balance').length
+  assert.ok(balances >= 3, `read the balance ${balances} times`)
+  assert.equal(s.commands().filter(c => c[0] === 'sync').length, 1)
   assert.equal((s.log().match(/USDX in leaves is 0 and its on-chain coins \(0\) cannot board more/g) || []).length, 1)
-  // Its on-chain coins arrive: boarded at the next look.
+  // Its on-chain coins arrive: boarded at the next look, and the board taken
+  // up by a sync soon after, not at the schedule's hour.
   let boarded = []
   for (let i = 0; i < 40 && !boarded.length; i++) {
     const st = JSON.parse(fs.readFileSync(s.stateFile, 'utf8'))
@@ -222,6 +226,67 @@ test('a low asset is looked at again soon, not at the schedule\'s longest wait, 
     boarded = s.commands().filter(c => c[0] === 'board' && c[1] === Y)
   }
   assert.equal(boarded.length, 1)
+  for (let i = 0; i < 20 && s.commands().filter(c => c[0] === 'sync').length < 2; i++) await new Promise(r => setTimeout(r, 100))
+  assert.equal(s.commands().filter(c => c[0] === 'sync').length, 2)
+})
+
+// The commands the fake ran, with when each started and ended.
+const times = s => { try { return fs.readFileSync(s.stateFile + '.times', 'utf8').trim().split('\n').map(l => JSON.parse(l)) } catch (e) { return [] } }
+
+test('payouts asked together are all paid in turn, never refused as busy', async t => {
+  const s = await start(t, { FAKE_ARCA_SEND_MS: '300' })
+  const asked = Date.now()
+  const all = await Promise.all([0, 1, 2, 3].map(() => s.post({ request: request() })))
+  assert.deepEqual(all.map(r => r.status), [200, 200, 200, 200], JSON.stringify(all.map(r => r.body)))
+  // One send at a time: the store is one wallet.
+  const sends = times(s).filter(c => c.command === 'send').sort((a, b) => a.began - b.began)
+  assert.equal(sends.length, 4)
+  for (let i = 1; i < sends.length; i++) assert.ok(sends[i].began >= sends[i - 1].ended, 'two sends overlapped')
+  assert.ok(Date.now() - asked < 4000)
+  // Each payout's line says how long it waited and how long its send took.
+  const lines = s.log().match(/leaf wallet: paid 20000 tSEQ into a receive request of owner [0-9a-f]+ \(waited \d+\.\d s behind .*, sent in \d+\.\d s\)$/gm) || []
+  assert.equal(lines.length, 4, s.log())
+  assert.match(s.log(), /and [123] payout\(s\), sent in/)
+})
+
+test('past the most payouts that may wait, one is refused as busy, with reason busy', async t => {
+  const s = await start(t, { FAKE_ARCA_SEND_MS: '400', FAUCET_LEAF_MAX_WAITING: '1' })
+  const all = await Promise.all([0, 1, 2].map(i => new Promise(r => setTimeout(r, i * 50)).then(() => s.post({ request: request() }))))
+  const busy = all.filter(r => r.status === 429)
+  assert.equal(busy.length, 1, JSON.stringify(all.map(r => [r.status, r.body])))
+  assert.equal(busy[0].body.reason, 'busy')
+  assert.equal(busy[0].body.claimed, false)
+  assert.equal(all.filter(r => r.status === 200).length, 2)
+})
+
+test('a payout waits only for the command running, and no sync starts while payouts wait or just after one', async t => {
+  // A sync is due all the time and takes 1.5 s.
+  const s = await start(t, { FAUCET_LEAF_SYNC_MIN_MS: '100', FAUCET_LEAF_SYNC_MAX_MS: '200', FAKE_ARCA_NEXT: '0', FAKE_ARCA_SYNC_MS: '1500', FAUCET_LEAF_PAY_QUIET_MS: '1000' })
+  // Asked once a sync has started.
+  for (let i = 0; i < 200 && s.commands().filter(c => c[0] === 'sync').length < 2; i++) await new Promise(r => setTimeout(r, 10))
+  const asked = Date.now()
+  const r = await s.post({ request: request() })
+  const answered = Date.now()
+  assert.equal(r.status, 200, JSON.stringify(r.body))
+  // It waited for that sync to end, and for nothing queued after it.
+  const sync = times(s).filter(c => c.command === 'sync').pop()
+  const send = times(s).find(c => c.command === 'send')
+  assert.ok(send.began >= sync.ended, 'the send ran during a sync')
+  assert.ok(send.began - sync.ended < 300, `the send started ${send.began - sync.ended} ms after the sync ended`)
+  assert.ok(answered - asked < 1500 + 800, `answered after ${answered - asked} ms`)
+  assert.match(s.log(), /waited \d+\.\d s behind sync \(running \d+\.\d s\), sent in/)
+  // A second payout right after the first starts at once, and no sync starts
+  // within the quiet second after the last payout.
+  const asked2 = Date.now()
+  assert.equal((await s.post({ request: request() })).status, 200)
+  assert.ok(Date.now() - asked2 < 500, `the second payout took ${Date.now() - asked2} ms`)
+  // The next sync then runs (1.5 s) and is on record once it ends.
+  await new Promise(r => setTimeout(r, 3000))
+  const sends = times(s).filter(c => c.command === 'send')
+  const lastSend = sends[sends.length - 1]
+  const nextSync = times(s).filter(c => c.command === 'sync' && c.began > send.began)[0]
+  assert.ok(nextSync, 'the upkeep synced again after the payouts')
+  assert.ok(nextSync.began - lastSend.ended >= 950, `a sync started ${nextSync.began - lastSend.ended} ms after a payout`)
 })
 
 test('without a leaf wallet, a receive request is refused and the page offers none', async t => {

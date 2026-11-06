@@ -117,7 +117,7 @@ in words a person can act on, and in `reason`:
 | `wallet` | true | the wallet's id, mailbox or Bitcoin ark address was paid this asset |
 | `address` | true | the address was paid this asset |
 | `network` | false | the IP was paid this asset for ten different wallets in the last day; the message says how long until it can ask again, and `next` gives that time |
-| `busy` | false | a payout to one of the same keys is being paid now |
+| `busy` | false | a payout to one of the same keys is being paid now, or more leaf payouts wait their turn than the faucet queues (`FAUCET_LEAF_MAX_WAITING`) |
 
 Addresses may be transparent (`tb1`, the default on Sequentia) or blinded
 (`tsqb1`). Both are funded the same way, except tSEQ paid from the drip
@@ -140,7 +140,8 @@ leaves" below):
 { "amount": "500000", "asset": "USDX", "leaf": { "asset": "<asset id>", "atoms": "50000000000000", "owner": "<the request's key>" } }
 ```
 
-The wallet's next `arca sync` reads the coin from its mailbox and holds it.
+The coin is in the wallet's mailbox once the faucet answers: the wallet's
+`arca mailbox` takes it in at once (so does its next `arca sync`).
 The amount is the one an on-chain request of the asset pays now (for tSEQ the
 tier in force), or the request's own value when it asks for less. The same
 rule applies: once per wallet per asset (its `wallet` id and the request's
@@ -217,6 +218,8 @@ environment variable:
 | `FAUCET_BTC_REFRESH_MS` | `60000` | how often the Bitcoin side's balance is read |
 | `FAUCET_BTC_LOCK_WAIT_MS` | `3000` | the wait before a Bark command that found the wallet held by another process is tried again (five times at most) |
 | `FAUCET_LEAF_SYNC_MIN_MS`, `FAUCET_LEAF_SYNC_MAX_MS` | `60000`, `3600000` | the bounds on the time between two syncs of the leaf wallet |
+| `FAUCET_LEAF_PAY_QUIET_MS` | `10000` | no sync of the leaf wallet starts within this long of the last leaf payout |
+| `FAUCET_LEAF_MAX_WAITING` | `20` | the most leaf payouts that wait their turn; one more is refused as `busy` |
 
 ## How much tSEQ a request pays
 
@@ -330,23 +333,33 @@ of its own on an Arca operator: the `arca` command line
 covenant's reserve and never the treasury: it is funded by boarding its own
 on-chain coins, which are sent to it like to any address (`arca address`).
 
-- **A payout** is `arca send REQUEST --amount N --asset ID`, one at a time.
-  Before it, the faucet checks the request's operator (`FAUCET_LEAF_OPERATOR`),
+- **A payout** is `arca send REQUEST --amount N --asset ID`, one command at a
+  time on the wallet, and before any of the wallet's upkeep: a payout waits
+  only for the one upkeep command already running, and payouts asked together
+  wait their turn (up to `FAUCET_LEAF_MAX_WAITING` of them; past that one is
+  refused with a `429`, `reason` `busy`). Each payout's log line says how long
+  it waited, behind what, and how long its send took. Before it, the faucet checks the request's operator (`FAUCET_LEAF_OPERATOR`),
   its chain, the asset and its lapse against the chain's median time at the
   wallet's last sync, with a minute's margin; the wallet then checks the lapse,
   the operator and the asset again against the chain now before it signs.
 - **Syncs** follow the library's schedule: after each `arca sync` the faucet
   runs the next when `schedule.next_sync_at` says, within
-  `FAUCET_LEAF_SYNC_MIN_MS` and `FAUCET_LEAF_SYNC_MAX_MS`. A sync reads the
+  `FAUCET_LEAF_SYNC_MIN_MS` and `FAUCET_LEAF_SYNC_MAX_MS`, and within
+  `FAUCET_LEAF_SYNC_MIN_MS` while a board waits to be taken up. A sync is the
+  one long command (a round it takes part in can hold it a minute or more), so
+  it never starts while a payout waits or within `FAUCET_LEAF_PAY_QUIET_MS` of
+  the last one, and one that takes over 20 seconds is logged with its slowest
+  steps. A sync reads the
   wallet's mailbox, moves its boards on and refreshes its coins in their free
   window before their exit deadline, so the wallet's coins stay alive by
   themselves.
-- **Boards**: after each sync, an asset whose leaves hold fewer than
+- **Boards**: at each pass of the upkeep, an asset whose leaves hold fewer than
   `FAUCET_LEAF_LOW` payouts, and none boarding, is boarded with
   `FAUCET_LEAF_BOARD` payouts from the wallet's on-chain coins, at most nine
   tenths of them (the rest pays the board's fee, in the asset boarded). When
   the on-chain coins cannot cover a payout the log says so: fund the wallet's
-  address.
+  address. The faucet then reads the wallet's balance again every
+  `FAUCET_LEAF_SYNC_MIN_MS`, without a sync, and boards once the coins show.
 
 Setting it up on the operator's chain:
 
