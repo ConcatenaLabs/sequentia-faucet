@@ -60,6 +60,9 @@ function decode (text) {
 function init (cfg) {
   const { arca, datadir, operator, assets, amountFor, syncMinMs = 60000, syncMaxMs = 3600000, low = 5, board = 20, log = console } = cfg
   const { payQuietMs = 10000, maxWaiting = 20, now = Date.now } = cfg
+  // How many payouts of an asset (its leaves, those boarding and what its on-chain coins can
+  // still board) make it low: said in the log once, and by `left`, before it runs out.
+  const { warn = 8 } = cfg
   const run = (args, timeout = 120000) => new Promise(resolve => {
     execFile(arca, ['--datadir', datadir, ...args], { timeout, maxBuffer: 1 << 24 }, (err, stdout, stderr) => {
       let out = null
@@ -128,6 +131,21 @@ function init (cfg) {
   // whether an asset is low with too few on-chain coins to board (its balance
   // is read again soon, with no sync: on-chain coins show without one).
   const short = new Set()
+  // Each asset's payouts as last read: { leaves, boarding, onchain, low }.
+  const left = new Map()
+  const warned = new Set()
+  function count (label, pay, spendable, pending, onchain) {
+    const c = { leaves: Number(spendable / pay), boarding: Number(pending / pay), onchain: Number(onchain * 9n / 10n / pay) }
+    c.low = c.leaves + c.boarding + c.onchain < warn
+    left.set(label, c)
+    if (c.low && !warned.has(label)) {
+      warned.add(label)
+      log.error(`leaf wallet: ${label} runs low: ${c.leaves} payout(s) in leaves, ${c.boarding} boarding, ${c.onchain} more on chain (warned under ${warn}); fund ${datadir} on-chain before it runs out`)
+    } else if (!c.low && warned.has(label)) {
+      warned.delete(label)
+      log.log(`leaf wallet: ${label} holds ${c.leaves + c.boarding + c.onchain} payouts again`)
+    }
+  }
   async function topUp () {
     const res = { boarding: false, short: false }
     if (!low || !board) return res
@@ -140,6 +158,7 @@ function init (cfg) {
       try { pay = BigInt(toAtoms(amountFor(label))) } catch (e) { continue }
       const held = (r.out.arca && r.out.arca[id]) || {}
       const spendable = BigInt(held.live || 0) + BigInt(held['operator-confirmed'] || 0)
+      count(label, pay, spendable, BigInt(held.pending || 0), BigInt((r.out.sequentia_onchain && r.out.sequentia_onchain[id]) || 0))
       if (spendable >= pay * BigInt(low)) { short.delete(label); continue }
       if (BigInt(held.pending || 0) > 0n) { res.boarding = true; continue }
       const onchain = BigInt((r.out.sequentia_onchain && r.out.sequentia_onchain[id]) || 0)
@@ -261,7 +280,10 @@ function init (cfg) {
     })
   }
 
-  return { decode, check, pay, start, tick, state }
+  // What each asset holds, in payouts, as last read, and the level that counts as low.
+  const holdings = () => ({ warn, assets: Object.fromEntries(left) })
+
+  return { decode, check, pay, start, tick, state, holdings }
 }
 
 module.exports = { init, decode, toAtoms, toCoins }

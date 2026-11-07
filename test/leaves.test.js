@@ -304,3 +304,20 @@ test('without a leaf wallet, a receive request is refused and the page offers no
   const page = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8')
   assert.doesNotMatch(page, /arca|leaf|leaves|receive request/i)
 })
+
+test('an asset under FAUCET_LEAF_WARN payouts is said low once, before it runs out, and by /leaves', async t => {
+  const s = await start(t, { FAUCET_LEAF_SYNC_MIN_MS: '100', FAUCET_LEAF_SYNC_MAX_MS: '60000', FAKE_ARCA_NEXT: '3600', FAUCET_LEAF_WARN: '8' })
+  await new Promise(r => setTimeout(r, 600))
+  // USDX holds nothing: low, said once however often it is read.
+  let l = await s.get('/leaves')
+  assert.equal(l.warn, 8)
+  assert.deepEqual(l.assets.USDX, { leaves: 0, boarding: 0, onchain: 0, low: true })
+  assert.equal((s.log().match(/leaf wallet: USDX runs low: 0 payout\(s\) in leaves, 0 boarding, 0 more on chain \(warned under 8\)/g) || []).length, 1)
+  // Funded on the chain with 20 payouts: no longer low, and the log says it holds them again.
+  const st = JSON.parse(fs.readFileSync(s.stateFile, 'utf8'))
+  st.onchain[Y] = String(20n * 50000000000000n * 10n / 9n + 1n); fs.writeFileSync(s.stateFile, JSON.stringify(st))
+  for (let i = 0; i < 40 && (await s.get('/leaves')).assets.USDX.low; i++) await new Promise(r => setTimeout(r, 100))
+  l = await s.get('/leaves')
+  assert.equal(l.assets.USDX.low, false)
+  assert.match(s.log(), /leaf wallet: USDX holds \d+ payouts again/)
+})
