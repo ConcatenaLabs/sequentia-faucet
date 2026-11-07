@@ -257,6 +257,7 @@ const leaves = LEAF_ARCA ? require('./leaves').init({
   payQuietMs: Number(process.env.FAUCET_LEAF_PAY_QUIET_MS ?? 10000),
   maxWaiting: Number(process.env.FAUCET_LEAF_MAX_WAITING || 20),
   low: Number(process.env.FAUCET_LEAF_LOW ?? 5),
+  warn: Number(process.env.FAUCET_LEAF_WARN ?? 8),
   board: Number(process.env.FAUCET_LEAF_BOARD ?? 20)
 }) : null
 if (leaves) leaves.start()
@@ -285,6 +286,11 @@ app.disable('x-powered-by')
 app.set('trust proxy', 1)
 
 app.get('/healthz', (req, res) => res.json({ ok: true }))
+
+// How many payouts of each asset the leaf wallet holds (in leaves, boarding, and what its on-chain
+// coins can still board), as last read, and the level under which one counts as low: for the
+// check that warns before an asset runs out (deploy/faucet-check.sh).
+app.get('/leaves', (req, res) => res.json(leaves ? leaves.holdings() : { warn: null, assets: {} }))
 
 // What a tSEQ request pays right now, so the page can say so before the click;
 // with `?asset=BTC`, what a BTC request pays (0 while the faucet has none).

@@ -212,6 +212,7 @@ environment variable:
 | `FAUCET_LEAF_OPERATOR` | unset | with `FAUCET_LEAF_ARCA`: the operator key the leaf wallet must be on; a request for another operator is refused |
 | `FAUCET_LEAF_ASSETS` | unset | with `FAUCET_LEAF_ARCA`: the assets paid as leaves, `label=asset id,…` (`tSEQ=<id>,USDX=<id>`) |
 | `FAUCET_LEAF_LOW` | `5` | board more of an asset when the leaves hold fewer payouts of it than this (`0`: never board) |
+| `FAUCET_LEAF_WARN` | `8` | an asset whose leaves, boards under way and on-chain coins together hold fewer payouts than this is low: the log says so once, and `/leaves` and the check say so until it is funded |
 | `FAUCET_LEAF_BOARD` | `20` | how many payouts of an asset one board brings in |
 | `FAUCET_BTC_ARCA` | unset | the `arca` command line; set, BTC is paid from its wallet's Bitcoin side (Bark's `bark` named by `ARCA_BARK_EXEC`) |
 | `FAUCET_BTC_DATADIR` | unset | with `FAUCET_BTC_ARCA`: the `arca` wallet's directory, whose `bitcoin/` holds the Bitcoin side |
@@ -360,6 +361,22 @@ on-chain coins, which are sent to it like to any address (`arca address`).
   the on-chain coins cannot cover a payout the log says so: fund the wallet's
   address. The faucet then reads the wallet's balance again every
   `FAUCET_LEAF_SYNC_MIN_MS`, without a sync, and boards once the coins show.
+- **Before it runs out**: at each reading of the balance the faucet counts each
+  asset's payouts (in leaves, boarding, and what its on-chain coins can still
+  board, at nine tenths). Under `FAUCET_LEAF_WARN` of them the log says once
+  `leaf wallet: <ASSET> runs low: …; fund <datadir> on-chain before it runs
+  out`, and again when it holds enough. `GET /leaves` answers the same counts:
+
+  ```json
+  { "warn": 8, "assets": { "USDX": { "leaves": 2, "boarding": 0, "onchain": 17, "low": false } } }
+  ```
+
+  `deploy/faucet-check.sh`, run every 15 minutes by `faucet-check.timer`,
+  fails naming each low asset, and tells a person once when its verdict
+  changes, through `FAUCET_ALERT` (by default the box's `pignus-alert.sh`).
+  An asset that runs out is paid on the chain instead, after a block rather
+  than in seconds, so funding it early keeps the receive card's "in seconds"
+  true.
 
 Setting it up on the operator's chain:
 
@@ -400,7 +417,8 @@ every pull request and on `main`; the local-chain test needs a node and is not r
 
 ## Deploy
 
-`deploy/sequentia-faucet.service` is the systemd unit. The box pulls this repo
+`deploy/sequentia-faucet.service` is the systemd unit; `deploy/faucet-check.service`
+and `deploy/faucet-check.timer` run the payouts-left check (above). The box pulls this repo
 from GitHub and runs it there; source is never edited on the server. The claims
 ledger lives outside the checkout, so a deploy never touches it; keep it in
 the box's backups.
