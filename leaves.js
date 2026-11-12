@@ -304,7 +304,13 @@ function init (cfg) {
         return false
       }
       refreshFailed = ''
-      for (const c of deep) { const p = places.get(c.id); p.settling = true; p.live -= BigInt(c.value); c.state = 'given' }
+      for (const c of deep) {
+        const p = places.get(c.id)
+        p.settling = true
+        p.live -= BigInt(c.value)
+        const listed = p.coins.find(x => x.leaf_id === c.leaf_id)
+        if (listed) listed.state = 'given'
+      }
       log.log(`leaf wallet: refreshing ${what} in the next round (depth limit ${limit === null ? 'not published' : limit})`)
       return true
     }, !urgent).finally(() => {
