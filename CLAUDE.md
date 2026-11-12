@@ -95,7 +95,11 @@ only, and a leaf is paid only to a wallet that sends a receive request. Every
 `arca` command runs through `execFile`, the request as one argv element, one
 command at a time, since the wallet is one store. A payout goes before the
 wallet's upkeep and never waits behind a queued sync, since a person is
-watching for it.
+watching for it. The upkeep keeps the coins shallow by the operator's
+published depth limit (`server_info.depth_limit`, never a constant), and maps
+a refusal by its code or kind (`depth_limit`, `settle_first`), never by its
+words. While an asset's coins wait in a refresh, no payout of it is sent that
+its other live coins cannot cover: the wallet would take the refresh back.
 
 ## Deploy
 

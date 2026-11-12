@@ -187,7 +187,8 @@ test('the wallet\'s own lapse check, against the chain now, refuses what the fau
 
 test('the leaf wallet syncs on its schedule, boards when low and refuses work on another operator', async t => {
   const s = await start(t, { FAUCET_LEAF_SYNC_MIN_MS: '100', FAUCET_LEAF_SYNC_MAX_MS: '200', FAKE_ARCA_NEXT: '0', FAKE_ARCA_LIVE: '0' })
-  await new Promise(r => setTimeout(r, 900))
+  // Each pass runs sync, info, coin-places and balance.
+  for (let i = 0; i < 40 && s.commands().filter(c => c[0] === 'sync').length < 3; i++) await new Promise(r => setTimeout(r, 100))
   const syncs = s.commands().filter(c => c[0] === 'sync').length
   assert.ok(syncs >= 3, `synced ${syncs} times`)
   // Boarded tSEQ (20 payouts of the tier) once, waited while it was pending,
@@ -311,7 +312,8 @@ test('an asset under FAUCET_LEAF_WARN payouts is said low once, before it runs o
   // USDX holds nothing: low, said once however often it is read.
   let l = await s.get('/leaves')
   assert.equal(l.warn, 8)
-  assert.deepEqual(l.assets.USDX, { leaves: 0, boarding: 0, onchain: 0, low: true })
+  const { leaves, boarding, onchain, low } = l.assets.USDX
+  assert.deepEqual({ leaves, boarding, onchain, low }, { leaves: 0, boarding: 0, onchain: 0, low: true })
   assert.equal((s.log().match(/leaf wallet: USDX runs low: 0 payout\(s\) in leaves, 0 boarding, 0 more on chain \(warned under 8\)/g) || []).length, 1)
   // Funded on the chain with 20 payouts: no longer low, and the log says it holds them again.
   const st = JSON.parse(fs.readFileSync(s.stateFile, 'utf8'))
@@ -320,4 +322,148 @@ test('an asset under FAUCET_LEAF_WARN payouts is said low once, before it runs o
   l = await s.get('/leaves')
   assert.equal(l.assets.USDX.low, false)
   assert.match(s.log(), /leaf wallet: USDX holds \d+ payouts again/)
+})
+
+// The leaf wallet's coins in the fake's state file, and a change to them.
+const coinsOf = s => JSON.parse(fs.readFileSync(s.stateFile, 'utf8')).coins
+const editCoins = (s, f) => { const st = JSON.parse(fs.readFileSync(s.stateFile, 'utf8')); f(st.coins); fs.writeFileSync(s.stateFile, JSON.stringify(st)) }
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+// Waits for the upkeep's first look at the coins, after which a test changes them unseen.
+async function looked (s) {
+  for (let i = 0; i < 100 && !s.commands().some(c => c[0] === 'coin-places'); i++) await sleep(20)
+  await sleep(50)
+}
+// Waits until no coin waits in a refresh (at most `ms`).
+async function settled (s, ms = 4000) {
+  for (let i = 0; i < ms / 50 && coinsOf(s).some(c => c.state === 'given'); i++) await sleep(50)
+}
+// The upkeep's quick pace: a pass a tenth of a second apart, a sync only on
+// the schedule's hour unless a board or a refresh waits, and no low asset to
+// board for (FAUCET_LEAF_LOW 0) so passes are not brought forward by one.
+const QUICK = { FAUCET_LEAF_SYNC_MIN_MS: '100', FAUCET_LEAF_SYNC_MAX_MS: '60000', FAKE_ARCA_NEXT: '3600', FAUCET_LEAF_LOW: '0', FAUCET_LEAF_PAY_QUIET_MS: '200' }
+
+test('five payouts in a row from one coin, and the sixth is paid as a leaf too: the coin is refreshed before the limit', async t => {
+  const s = await start(t, QUICK)
+  const paid = []
+  for (let i = 0; i < 6; i++) {
+    const r = await s.post({ request: request() })
+    paid.push(r.status)
+    assert.equal(r.status, 200, `payout ${i + 1}: ${JSON.stringify(r.body)}\n${s.log()}`)
+    assert.ok(r.body.leaf, 'paid as a leaf')
+    // Between payouts: the quiet moment, then any refresh's round.
+    await sleep(500)
+    await settled(s)
+  }
+  // Refreshed once the change was three reassignments deep (limit 5), and
+  // never refused by the operator.
+  const refreshes = s.commands().filter(c => c[0] === 'participate')
+  assert.ok(refreshes.length >= 1, 'a refresh was given up')
+  assert.doesNotMatch(s.log(), /depth_limit/)
+  assert.match(s.log(), /leaf wallet: refreshing 9\d{5} tSEQ at 3 hops in the next round \(depth limit 5\)/)
+  assert.ok(coinsOf(s).filter(c => c.state === 'live').every(c => c.hops < 3), JSON.stringify(coinsOf(s)))
+})
+
+test('a payout refused for depth starts the refresh at once, and the next payout is a leaf', async t => {
+  // A sync waits 1.5 s after a payout; the refresh does not.
+  const s = await start(t, { ...QUICK, FAUCET_LEAF_PAY_QUIET_MS: '1500' })
+  // The wallet's coin is at the operator's limit, unseen by the faucet's last look.
+  await looked(s)
+  editCoins(s, cs => { cs[0].hops = 5 })
+  const refused = await s.post({ request: request() })
+  assert.equal(refused.status, 503, JSON.stringify(refused.body))
+  assert.match(refused.body.error, /no tSEQ in leaves to pay now/)
+  assert.match(s.log(), /422 depth_limit/)
+  // The refresh started at once, not after the quiet moment, and a sync took its round up.
+  for (let i = 0; i < 100 && !coinsOf(s).some(c => c.kind === 'round'); i++) await sleep(50)
+  const send = times(s).find(c => c.command === 'send')
+  const refresh = times(s).find(c => c.command === 'participate')
+  assert.ok(refresh && refresh.began - send.ended < 500, 'refreshed at once: ' + JSON.stringify(times(s)))
+  assert.ok(coinsOf(s).some(c => c.kind === 'round' && c.state === 'live'), 'the round gave the coin back with no depth: ' + JSON.stringify(s.commands()) + s.log())
+  await sleep(300)
+  const r = await s.post({ request: request() })
+  assert.equal(r.status, 200, JSON.stringify(r.body) + '\n' + s.log())
+  assert.ok(r.body.leaf)
+})
+
+test('a library that answers settle_first is answered the same way: its coins are refreshed, and the next payout is a leaf', async t => {
+  const s = await start(t, { ...QUICK, FAUCET_LEAF_PAY_QUIET_MS: '1000', FAKE_ARCA_SETTLE_FIRST: '1' })
+  await looked(s)
+  editCoins(s, cs => { cs[0].hops = 5 })
+  const deep = coinsOf(s)[0].leaf_id
+  const refused = await s.post({ request: request() })
+  assert.equal(refused.status, 503, JSON.stringify(refused.body))
+  for (let i = 0; i < 100 && !coinsOf(s).some(c => c.kind === 'round'); i++) await sleep(50)
+  const p = s.commands().find(c => c[0] === 'participate')
+  assert.deepEqual(p && p.slice(1), ['--leaf', deep], 'the coin the refusal named was refreshed')
+  await sleep(300)
+  const r = await s.post({ request: request() })
+  assert.equal(r.status, 200, JSON.stringify(r.body) + '\n' + s.log())
+})
+
+test('a coin the operator cannot fund the refresh of now is left until it can, said once', async t => {
+  // A pass every half second, so the operator's info is read again soon.
+  const s = await start(t, { ...QUICK, FAKE_ARCA_FUNDABLE: '1000', FAUCET_LEAF_SYNC_MAX_MS: '500' })
+  await looked(s)
+  editCoins(s, cs => { cs[0].hops = 3 })
+  await s.post({ request: request() })
+  await sleep(800)
+  assert.equal(s.commands().filter(c => c[0] === 'participate').length, 0)
+  assert.equal((s.log().match(/not refreshing .* tSEQ at 4 hops: the operator cannot fund its refresh now/g) || []).length, 1, s.log())
+  // The operator can fund it: refreshed at the next look.
+  fs.writeFileSync(s.stateFile + '.fundable', '100000000000000000')
+  await s.post({ request: request() })
+  for (let i = 0; i < 60 && !s.commands().some(c => c[0] === 'participate'); i++) await sleep(50)
+  assert.ok(s.commands().some(c => c[0] === 'participate'), s.log())
+})
+
+test('the depth limit is read from the operator, never a constant', async t => {
+  // A limit of 4: refreshed after the second payout (2 + 3 > 4).
+  const four = await start(t, { ...QUICK, FAKE_ARCA_DEPTH_LIMIT: '4' })
+  for (let i = 0; i < 2; i++) { assert.equal((await four.post({ request: request() })).status, 200); await sleep(500) }
+  await settled(four)
+  assert.equal(four.commands().filter(c => c[0] === 'participate').length, 1, four.log())
+  assert.match(four.log(), /at 2 hops in the next round \(depth limit 4\)/)
+  // A limit of 9: five payouts, no refresh (5 + 3 <= 9).
+  const nine = await start(t, { ...QUICK, FAKE_ARCA_DEPTH_LIMIT: '9' })
+  for (let i = 0; i < 5; i++) { assert.equal((await nine.post({ request: request() })).status, 200); await sleep(300) }
+  await sleep(500)
+  assert.equal(nine.commands().filter(c => c[0] === 'participate').length, 0, nine.log())
+  assert.equal((await nine.get('/leaves')).depth_limit, 9)
+  // None published: none refreshed by depth.
+  const none = await start(t, { ...QUICK, FAKE_ARCA_DEPTH_LIMIT: 'none' })
+  for (let i = 0; i < 4; i++) { assert.equal((await none.post({ request: request() })).status, 200); await sleep(300) }
+  await sleep(500)
+  assert.equal(none.commands().filter(c => c[0] === 'participate').length, 0, none.log())
+})
+
+test('while coins wait for their round, a payout is paid from another shallow coin or answered at once, the refresh never taken back', async t => {
+  // The round is taken up by a sync two seconds after the refresh at the soonest.
+  const s = await start(t, { ...QUICK, FAUCET_LEAF_SYNC_MIN_MS: '2000', FAUCET_LEAF_PAY_QUIET_MS: '300' })
+  await looked(s)
+  editCoins(s, cs => { cs[0].hops = 5 })
+  assert.equal((await s.post({ request: request() })).status, 503)
+  for (let i = 0; i < 60 && !coinsOf(s).some(c => c.state === 'given'); i++) await sleep(20)
+  const deep = coinsOf(s).find(c => c.state === 'given')
+  assert.ok(deep, 'the deep coin waits in a refresh')
+  // No other coin: answered at once, nothing sent, the refresh left alone.
+  const sends = () => s.commands().filter(c => c[0] === 'send').length
+  const before = sends()
+  const asked = Date.now()
+  const r = await s.post({ request: request() })
+  assert.equal(r.status, 503, JSON.stringify(r.body))
+  assert.ok(Date.now() - asked < 500, 'answered at once')
+  assert.equal(sends(), before, 'no send while the refresh waits')
+  assert.match(s.log(), /its coins wait for a round/)
+  // A shallow coin of 2.5 payouts arrives: the next payout is paid from it.
+  editCoins(s, cs => cs.push({ leaf_id: 'e'.repeat(64), asset: X, value: '5000000000000', hops: 0, state: 'live', kind: 'round' }))
+  await sleep(150)
+  const paid = await s.post({ request: request() })
+  assert.equal(paid.status, 200, JSON.stringify(paid.body) + '\n' + s.log())
+  assert.equal(coinsOf(s).find(c => c.leaf_id === deep.leaf_id).state, 'given', 'the refresh was not taken back')
+  // Then the round: the deep coin is back as a coin of no depth.
+  for (let i = 0; i < 80 && coinsOf(s).some(c => c.state === 'given'); i++) await sleep(50)
+  assert.ok(coinsOf(s).some(c => c.kind === 'round' && c.value === '100000000000000' && c.state === 'live'))
+  // Every command ran alone.
+  const ts = times(s).sort((a, b) => a.began - b.began)
+  for (let i = 1; i < ts.length; i++) assert.ok(ts[i].began >= ts[i - 1].ended, `${ts[i - 1].command} and ${ts[i].command} overlapped`)
 })

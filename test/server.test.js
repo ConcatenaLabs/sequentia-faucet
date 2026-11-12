@@ -43,12 +43,16 @@ async function start (t, env, ledger) {
     stdio: ['ignore', 'pipe', 'pipe']
   })
   t.after(() => child.kill())
+  let log = ''
+  child.stdout.on('data', d => { log += d })
+  child.stderr.on('data', d => { log += d })
   await new Promise((resolve, reject) => {
     child.stdout.on('data', d => { if (String(d).includes('listening')) resolve() })
     child.once('exit', code => reject(new Error('the server exited ' + code)))
   })
   const url = 'http://127.0.0.1:' + port
   return {
+    log: () => log,
     get: async p => (await fetch(url + p)).json(),
     child,
     post: async (body, ip, headers = {}) => {
@@ -144,6 +148,37 @@ test('a drip never overlaps the status check: the node runs one scan at a time',
   assert.equal(calls.filter(c => c === 'drip').length, 6)
   assert.ok(calls.filter(c => c === 'status').length > 6, 'the status checks ran: ' + calls.join(' '))
   assert.equal(fs.existsSync(state + '.refused'), false, 'refused scans: ' + (fs.existsSync(state + '.refused') && fs.readFileSync(state + '.refused', 'utf8')))
+})
+
+test('a scan refused because another reader of the node is scanning is tried again, by the status check and the drip alike', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'faucet-server-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const state = path.join(dir, 'state')
+  // Another reader of the node holds its one scan when the faucet starts.
+  fs.writeFileSync(state + '.scan', 'another reader')
+  const s = await start(t, {
+    FAUCET_DRIP: path.join(__dirname, 'fake-drip.js'),
+    FAUCET_DRIP_INSTANCE: path.join(dir, 'instance.json'),
+    FAUCET_DRIP_MNEMONIC: path.join(dir, 'faucet.mnemonic'),
+    FAKE_DRIP_STATE: state,
+    FAKE_DRIP_SCAN_MS: '10',
+    FAUCET_SCAN_RETRY_MS: '200',
+    FAUCET_BALANCE_REFRESH_MS: '600000'
+  })
+  await new Promise(r => setTimeout(r, 700))
+  fs.unlinkSync(state + '.scan')
+  // The status check waited for it, and read the reserve's tier once it ended.
+  for (let i = 0; i < 50 && (await s.get('/amount')).amount !== '50000'; i++) await new Promise(r => setTimeout(r, 50))
+  assert.equal((await s.get('/amount')).amount, '50000', s.log())
+  assert.match(s.log(), /drip status: the node is running another scan; trying again every 0\.2 s/)
+  assert.match(s.log(), /drip status: no longer refused for another scan after [3-9] tries/)
+  assert.doesNotMatch(s.log(), /drip status failed/)
+  // A drip asked while another scan runs is paid once it ends, not refused.
+  fs.writeFileSync(state + '.scan', 'another reader')
+  setTimeout(() => fs.unlinkSync(state + '.scan'), 500)
+  const paid = await s.post({ address: TB1(40) })
+  assert.equal(paid.status, 200, JSON.stringify(paid.body))
+  assert.match(s.log(), /drip drip: no longer refused for another scan after \d+ tries/)
 })
 
 test('the drip covenant needs its instance and its key', async () => {
