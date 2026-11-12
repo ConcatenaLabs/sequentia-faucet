@@ -198,20 +198,41 @@ function coins (atoms) {
 // scantxoutset, which runs one scan at a time and refuses a second while the
 // first is running. So the two never overlap: a status check is skipped while
 // a drip is paying, and a drip waits for a status check already running.
+// Other readers of the same node scan too (an Arca wallet's balance and sync
+// do, the faucet's own leaf wallet among them), so a scan refused because
+// another is running is tried again, every SCAN_RETRY_MS for SCAN_TRIES
+// tries; a drip refused so has broadcast nothing (its scan comes first).
 // One drip at a time, too: the reserve is one coin, and a second spend of it
 // while the first is unconfirmed could only be refused.
 let dripping = false
 let checking = null   // the status check in flight, as a promise that settles when it ends
+const SCAN_BUSY = /Scan already in progress/
+const SCAN_RETRY_MS = Number(process.env.FAUCET_SCAN_RETRY_MS || 5000)
+const SCAN_TRIES = Number(process.env.FAUCET_SCAN_TRIES || 8)
+const lastLine = (err, stderr) => String(stderr || (err && err.message) || '').trim().split('\n').pop()
+// What the leaf wallet runs now, for a log line about a scan that collided.
+const leafDoing = () => (leaves && leaves.doing() ? `; the leaf wallet was running arca ${leaves.doing()}` : '')
+// Runs the drip tool, trying again while the node is busy with another scan.
+function runDrip (args, { timeout, tries = SCAN_TRIES }, done, tried = 1, began = Date.now()) {
+  execFile(DRIP, args, { timeout }, (err, stdout, stderr) => {
+    if (err && SCAN_BUSY.test(lastLine(err, stderr)) && tried < tries) {
+      if (tried === 1) console.log(`drip ${args[0]}: the node is running another scan${leafDoing()}; trying again every ${SCAN_RETRY_MS / 1000} s`)
+      return setTimeout(() => runDrip(args, { timeout, tries }, done, tried + 1, began), SCAN_RETRY_MS)
+    }
+    if (tried > 1) console.log(`drip ${args[0]}: ${err ? 'still' : 'no longer'} refused for another scan after ${tried} tries in ${((Date.now() - began) / 1000).toFixed(0)} s`)
+    done(err, stdout, stderr)
+  })
+}
 
 // With the drip covenant, what a request pays is the tier the covenant holds
 // for the reserve that is ready to drip.
 function refreshTier () {
   if (dripping || checking) return
   checking = new Promise(resolve => {
-    execFile(DRIP, dripArgs('status'), { timeout: 30000 }, (err, stdout, stderr) => {
+    runDrip(dripArgs('status'), { timeout: 30000 }, (err, stdout, stderr) => {
       checking = null
       resolve()
-      if (err) return console.error('drip status failed: ' + String(stderr || err.message).trim().split('\n').pop())
+      if (err) return console.error('drip status failed: ' + lastLine(err, stderr) + (SCAN_BUSY.test(lastLine(err, stderr)) ? leafDoing() : ''))
       let s
       try { s = JSON.parse(stdout) } catch (e) { return console.error('drip status unreadable') }
       if (s.tier_now === null || s.tier_now === undefined) return
@@ -347,7 +368,8 @@ function payFromCovenant (req, res, address, claim) {
   }
   dripping = true
   const args = dripArgs('drip').concat(['--mnemonic-file', DRIP_MNEMONIC, '--to', address])
-  Promise.resolve(checking).then(() => execFile(DRIP, args, { timeout: 60000 }, (err, stdout, stderr) => {
+  // A tester waits for this one: tried again for at most about 20 s.
+  Promise.resolve(checking).then(() => runDrip(args, { timeout: 60000, tries: Math.max(1, Math.ceil(20000 / SCAN_RETRY_MS)) }, (err, stdout, stderr) => {
     dripping = false
     const why = String(stderr || (err && err.message) || '').trim().split('\n').pop()
     if (err) claim.release()

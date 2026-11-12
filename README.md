@@ -221,6 +221,7 @@ environment variable:
 | `FAUCET_LEAF_SYNC_MIN_MS`, `FAUCET_LEAF_SYNC_MAX_MS` | `60000`, `3600000` | the bounds on the time between two syncs of the leaf wallet |
 | `FAUCET_LEAF_PAY_QUIET_MS` | `10000` | no sync of the leaf wallet starts within this long of the last leaf payout |
 | `FAUCET_LEAF_MAX_WAITING` | `20` | the most leaf payouts that wait their turn; one more is refused as `busy` |
+| `FAUCET_SCAN_RETRY_MS`, `FAUCET_SCAN_TRIES` | `5000`, `8` | with `FAUCET_DRIP`: a status check the node refuses because another scan is running is tried again this often, this many times (a drip, for about 20 seconds) |
 
 ## How much tSEQ a request pays
 
@@ -323,7 +324,14 @@ Make the treasury's mnemonic away from the server and keep it offline.
 `status` and `drip` both find the reserve with the node's `scantxoutset`, which
 runs one scan at a time. The faucet therefore never runs them together: its
 periodic status check is skipped while a drip is paying, and a request that
-arrives during a status check waits for it to end.
+arrives during a status check waits for it to end. Other programs on the same
+node scan too (every Arca wallet's `balance` and `sync` do, the faucet's own
+leaf wallet among them), so a scan the node refuses because another is
+running (`Scan already in progress`) is tried again every
+`FAUCET_SCAN_RETRY_MS`, up to `FAUCET_SCAN_TRIES` times for a status check and
+for about 20 seconds for a drip; a drip refused so has broadcast nothing,
+since its scan comes first. The log says when a scan waited, for how many
+tries, and what the leaf wallet was running at the time.
 
 ## Paying leaves
 
@@ -354,6 +362,27 @@ on-chain coins, which are sent to it like to any address (`arca address`).
   wallet's mailbox, moves its boards on and refreshes its coins in their free
   window before their exit deadline, so the wallet's coins stay alive by
   themselves.
+- **Shallow coins**: each payout spends the change of the one before, one
+  reassignment deeper each time, and the operator co-signs no new coin more
+  reassignments from a round or a board than its depth limit, which it
+  publishes in `arca info` (`server_info.depth_limit`). So after each payout,
+  in the same quiet moment a sync waits for, and at each pass of the upkeep,
+  the faucet reads its coins (`arca coin-places`, which reads the wallet's own
+  store and not the chain) and gives up in the operator's next round
+  (`arca participate --leaf ID`) every coin within two reassignments of that
+  limit, by the library's own rule (hops + 3 > limit), as far as the operator
+  says it can fund refreshes of that asset now (`fundable` in its `info`,
+  within its in-flight cap, read again just before): a refresh it cannot fund
+  would wait and be taken back, so such a coin is left, and the log says once
+  `not refreshing …: the operator cannot fund its refresh now`. The round gives it back
+  as a coin of no depth, which the next sync (within
+  `FAUCET_LEAF_SYNC_MIN_MS` while a refresh waits) takes up. A payout the
+  wallet refuses for depth (`depth_limit` from the operator, or `settle_first`
+  from a library that names the coins to settle) starts that refresh at once
+  and is answered `503`, so the wallet asking is paid on the chain. While an
+  asset's coins wait for their round, a payout of it is sent only if that
+  asset's other live coins cover it; otherwise it is answered `503` at once,
+  since the wallet would take the refresh back to pay with the deep coin.
 - **Boards**: at each pass of the upkeep, an asset whose leaves hold fewer than
   `FAUCET_LEAF_LOW` payouts, and none boarding, is boarded with
   `FAUCET_LEAF_BOARD` payouts from the wallet's on-chain coins, at most nine
@@ -365,10 +394,15 @@ on-chain coins, which are sent to it like to any address (`arca address`).
   asset's payouts (in leaves, boarding, and what its on-chain coins can still
   board, at nine tenths). Under `FAUCET_LEAF_WARN` of them the log says once
   `leaf wallet: <ASSET> runs low: …; fund <datadir> on-chain before it runs
-  out`, and again when it holds enough. `GET /leaves` answers the same counts:
+  out`, and again when it holds enough. A coin given up in a refresh counts as
+  in leaves. `GET /leaves` answers the same counts, with the operator's depth
+  limit and, as last read, each asset's coins (value, depth and state),
+  whether some wait for a round, and whether a payout of it would go out as a
+  leaf now:
 
   ```json
-  { "warn": 8, "assets": { "USDX": { "leaves": 2, "boarding": 0, "onchain": 17, "low": false } } }
+  { "warn": 8, "depth_limit": 5, "assets": { "USDX": { "leaves": 2, "boarding": 0, "onchain": 17, "low": false,
+    "coins": [{ "value": "1000", "hops": 1, "state": "live" }], "settling": false, "leaf_now": true } } }
   ```
 
   `deploy/faucet-check.sh`, run every 15 minutes by `faucet-check.timer`,
@@ -402,8 +436,10 @@ runs the request path with `FAUCET_CLI` pointed at `echo` or a stand-in, the
 once-per-wallet rule (`test/once.test.js`: each key, the IP window, a restart,
 a line cut short, two requests in flight, the exemption), the drip
 covenant's path with a stand-in for the tool, and the leaf path with a
-stand-in for `arca` (`test/fake-arca.js`), so no coins move; the stand-in
-refuses a second scan while one is running, as the node does. With a built tool
+stand-in for `arca` (`test/fake-arca.js`), so no coins move; the drip tool's
+stand-in refuses a second scan while one is running, as the node does, and
+the `arca` stand-in keeps each coin's depth and refuses as the operator does
+past its depth limit. With a built tool
 it also checks `key --new`, and with a built node it runs the tool against a
 local `elementsregtest` chain:
 
