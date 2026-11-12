@@ -21,6 +21,7 @@
 //   FAKE_ARCA_LIVE      what its wallet holds of X in leaves at first (atoms)
 //   FAKE_ARCA_HOPS      the depth of that first coin (0)
 //   FAKE_ARCA_DEPTH_LIMIT  the operator's depth limit (5); `none` publishes none
+//   <state>.hold       while it exists, no round is built: refreshes wait
 //   FAKE_ARCA_FUNDABLE  what the operator says it can fund of X for refreshes
 //                       (unpublished unless set; <state>.fundable overrides)
 //   FAKE_ARCA_SETTLE_FIRST  1: a send answers as a library with arca #785
@@ -52,7 +53,8 @@ try { state = JSON.parse(fs.readFileSync(stateFile, 'utf8')) } catch (e) {
   if (BigInt(live) > 0n) state.coins.push({ leaf_id: '0'.repeat(63) + '1', asset: X, value: live, hops: Number(process.env.FAKE_ARCA_HOPS || 0), state: 'live', kind: 'board' })
   state.n = 1
 }
-const save = () => fs.writeFileSync(stateFile, JSON.stringify(state))
+// Written whole, by a rename, so a test reading the file never sees half of it.
+const save = () => { fs.writeFileSync(stateFile + '.tmp', JSON.stringify(state)); fs.renameSync(stateFile + '.tmp', stateFile) }
 const LIMIT = process.env.FAKE_ARCA_DEPTH_LIMIT === 'none' ? null : Number(process.env.FAKE_ARCA_DEPTH_LIMIT || 5)
 const coin = (asset, value, hops, kind) => {
   state.n++
@@ -101,16 +103,20 @@ if (command === 'bitcoin') {
   // A pending board is final by the next sync, and so is the round of
   // every refresh that waits: each asset's coins given up come back as one
   // coin of no depth.
+  // While <state>.hold exists, the operator builds no round: refreshes wait.
+  const changed = Object.keys(state.pending).length > 0 || (state.parts.length > 0 && !fs.existsSync(stateFile + '.hold'))
   for (const [a, v] of Object.entries(state.pending)) coin(a, v, 0, 'board')
   state.pending = {}
   const refreshed = []
-  for (const p of state.parts) {
-    const given = state.coins.filter(c => p.coins.includes(c.leaf_id) && c.state === 'given')
-    for (const c of given) c.state = 'spent'
-    if (given.length) refreshed.push(coin(p.asset, sum(given), 0, 'round').leaf_id)
+  if (!fs.existsSync(stateFile + '.hold')) {
+    for (const p of state.parts) {
+      const given = state.coins.filter(c => p.coins.includes(c.leaf_id) && c.state === 'given')
+      for (const c of given) c.state = 'spent'
+      if (given.length) refreshed.push(coin(p.asset, sum(given), 0, 'round').leaf_id)
+    }
+    state.parts = []
   }
-  state.parts = []
-  save()
+  if (changed || !fs.existsSync(stateFile)) save()
   out({ schedule: { now: median, next_sync_at: median + Number(process.env.FAKE_ARCA_NEXT || 3600) }, ...(refreshed.length ? { refreshed } : {}) })
 } else if (command === 'balance') {
   // By standing, as the wallet says it: a coin paid out of round (a

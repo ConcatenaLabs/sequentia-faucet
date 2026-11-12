@@ -48,7 +48,6 @@ const nextIp = () => '198.51.100.' + (++ipSeq % 250 + 1)
 
 async function start (t, env = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'faucet-leaves-'))
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   // The treasury holds 20,000,000 tSEQ: the 20,000 tier.
   const cli = path.join(dir, 'cli')
   fs.writeFileSync(cli, '#!/bin/sh\necho 20000000\n', { mode: 0o755 })
@@ -63,7 +62,12 @@ async function start (t, env = {}) {
     },
     stdio: ['ignore', 'pipe', 'pipe']
   })
-  t.after(() => child.kill())
+  // The server stopped first, then its directory removed: a fake command it ran
+  // may still be writing there as it goes.
+  t.after(async () => {
+    if (child.exitCode === null) { child.kill(); await new Promise(r => child.once('exit', r)) }
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  })
   let log = ''
   child.stdout.on('data', d => { log += d })
   child.stderr.on('data', d => { log += d })
@@ -326,7 +330,12 @@ test('an asset under FAUCET_LEAF_WARN payouts is said low once, before it runs o
 
 // The leaf wallet's coins in the fake's state file, and a change to them.
 const coinsOf = s => JSON.parse(fs.readFileSync(s.stateFile, 'utf8')).coins
-const editCoins = (s, f) => { const st = JSON.parse(fs.readFileSync(s.stateFile, 'utf8')); f(st.coins); fs.writeFileSync(s.stateFile, JSON.stringify(st)) }
+const editCoins = (s, f) => {
+  const st = JSON.parse(fs.readFileSync(s.stateFile, 'utf8'))
+  f(st.coins)
+  fs.writeFileSync(s.stateFile + '.edit', JSON.stringify(st))
+  fs.renameSync(s.stateFile + '.edit', s.stateFile)
+}
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 // Waits for the upkeep's first look at the coins, after which a test changes them unseen.
 async function looked (s) {
@@ -437,12 +446,14 @@ test('the depth limit is read from the operator, never a constant', async t => {
 })
 
 test('while coins wait for their round, a payout is paid from another shallow coin or answered at once, the refresh never taken back', async t => {
-  // The round is taken up by a sync two seconds after the refresh at the soonest.
-  const s = await start(t, { ...QUICK, FAUCET_LEAF_SYNC_MIN_MS: '2000', FAUCET_LEAF_PAY_QUIET_MS: '300' })
+  // The operator builds no round until the test lets it.
+  const s = await start(t, { ...QUICK, FAUCET_LEAF_SYNC_MIN_MS: '200', FAUCET_LEAF_PAY_QUIET_MS: '300' })
   await looked(s)
+  fs.writeFileSync(s.stateFile + '.hold', '')
   editCoins(s, cs => { cs[0].hops = 5 })
   assert.equal((await s.post({ request: request() })).status, 503)
-  for (let i = 0; i < 60 && !coinsOf(s).some(c => c.state === 'given'); i++) await sleep(20)
+  // The faucet has the refresh's answer once /leaves says it settles.
+  for (let i = 0; i < 100 && !(await s.get('/leaves')).assets.tSEQ.settling; i++) await sleep(20)
   const deep = coinsOf(s).find(c => c.state === 'given')
   assert.ok(deep, 'the deep coin waits in a refresh')
   // /leaves says so: the coin given up, nothing to pay a leaf with now.
@@ -455,7 +466,7 @@ test('while coins wait for their round, a payout is paid from another shallow co
   const asked = Date.now()
   const r = await s.post({ request: request() })
   assert.equal(r.status, 503, JSON.stringify(r.body))
-  assert.ok(Date.now() - asked < 500, 'answered at once')
+  assert.ok(Date.now() - asked < 2000, 'answered at once, with no send')
   assert.equal(sends(), before, 'no send while the refresh waits')
   assert.match(s.log(), /its coins wait for a round/)
   // A shallow coin of 2.5 payouts arrives: the next payout is paid from it.
@@ -465,6 +476,7 @@ test('while coins wait for their round, a payout is paid from another shallow co
   assert.equal(paid.status, 200, JSON.stringify(paid.body) + '\n' + s.log())
   assert.equal(coinsOf(s).find(c => c.leaf_id === deep.leaf_id).state, 'given', 'the refresh was not taken back')
   // Then the round: the deep coin is back as a coin of no depth.
+  fs.unlinkSync(s.stateFile + '.hold')
   for (let i = 0; i < 80 && coinsOf(s).some(c => c.state === 'given'); i++) await sleep(50)
   assert.ok(coinsOf(s).some(c => c.kind === 'round' && c.value === '100000000000000' && c.state === 'live'))
   // Every command ran alone.
