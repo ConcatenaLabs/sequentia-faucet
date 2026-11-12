@@ -445,6 +445,10 @@ test('while coins wait for their round, a payout is paid from another shallow co
   for (let i = 0; i < 60 && !coinsOf(s).some(c => c.state === 'given'); i++) await sleep(20)
   const deep = coinsOf(s).find(c => c.state === 'given')
   assert.ok(deep, 'the deep coin waits in a refresh')
+  // /leaves says so: the coin given up, nothing to pay a leaf with now.
+  const shown = (await s.get('/leaves')).assets.tSEQ
+  assert.deepEqual({ coins: shown.coins, settling: shown.settling, leaf_now: shown.leaf_now },
+    { coins: [{ value: '1000000', hops: 5, state: 'given' }], settling: true, leaf_now: false })
   // No other coin: answered at once, nothing sent, the refresh left alone.
   const sends = () => s.commands().filter(c => c[0] === 'send').length
   const before = sends()
