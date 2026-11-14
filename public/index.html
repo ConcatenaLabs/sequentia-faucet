@@ -57,7 +57,7 @@
     </div>
 
     <div id="log"></div>
-    <p class="hint">The faucet pays each asset once per wallet. Once your wallet has an asset from here, trade for more of it in the wallet.</p>
+    <p class="hint">The faucet pays each asset once per wallet and once per address, and to at most ten wallets a day from one network. Once your wallet has an asset from here, trade for more of it in the wallet.</p>
   </div>
 
   <footer>
@@ -69,6 +69,17 @@ const $=id=>document.getElementById(id);
 const addrInput=$('addr');
 addrInput.value=localStorage.getItem('faucetAddr')||'';
 addrInput.addEventListener('input',()=>localStorage.setItem('faucetAddr',addrInput.value.trim()));
+// The field remembers the last address. Pasting into it means a new one: the
+// paste replaces what is there instead of landing beside it, which would make
+// two addresses run together into one the faucet cannot read.
+addrInput.addEventListener('paste',e=>{
+  const text=(e.clipboardData||window.clipboardData).getData('text').trim();
+  const all=addrInput.selectionStart===0&&addrInput.selectionEnd===addrInput.value.length;
+  if(!text||!addrInput.value||all) return;
+  e.preventDefault();
+  addrInput.value=text;
+  addrInput.dispatchEvent(new Event('input'));
+});
 
 fetch('/faucet/amount').then(r=>r.json()).then(j=>{
   if(j&&j.amount) $('tseqAmount').textContent=Number(j.amount).toLocaleString('en-US')+' per request';
@@ -133,6 +144,9 @@ async function requestOne(asset,addr){
 let running=false;
 async function withButtons(fn){
   if(running)return; running=true;
+  // Each request starts a fresh log: an answer to an earlier request (say,
+  // an address that did not read) must not sit under the new one.
+  $('log').replaceChildren();
   const btns=[...document.querySelectorAll('.assets button')];
   btns.forEach(b=>b.disabled=true);
   try{await fn();}finally{btns.forEach(b=>b.disabled=false);running=false;}

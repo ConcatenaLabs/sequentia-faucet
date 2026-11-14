@@ -122,7 +122,10 @@ in words a person can act on, and in `reason`:
 Addresses may be transparent (`tb1`, the default on Sequentia) or blinded
 (`tsqb1`). Both are funded the same way, except tSEQ paid from the drip
 covenant (below), which goes to transparent addresses only: a `tsqb1` address
-gets a `400`, and a request made before the reserve's next interval a `429`.
+gets a `400`, and a request made before the reserve's next interval a `429`
+with `reason: "interval"` and, when the drip tool says how long is left,
+`retry_after` in seconds; the error says when to try again. The interval is
+the covenant's, so it is shared by everyone who claims tSEQ.
 
 ### Asking for a leaf
 
