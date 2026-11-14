@@ -125,6 +125,24 @@ test('the drip covenant pays tSEQ, once per interval, to transparent addresses',
   assert.match(usdx.body.txid, /assetlabel=USDX/)
 })
 
+test('a drip refused because the last one is still unconfirmed is a wait, not a failure', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'faucet-server-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const s = await start(t, {
+    FAUCET_DRIP: path.join(__dirname, 'fake-drip.js'),
+    FAUCET_DRIP_INSTANCE: path.join(dir, 'instance.json'),
+    FAUCET_DRIP_MNEMONIC: path.join(dir, 'faucet.mnemonic'),
+    FAKE_DRIP_STATE: path.join(dir, 'state'),
+    FAKE_DRIP_PENDING: '1'
+  })
+  for (let i = 0; i < 50 && (await s.get('/amount')).amount !== '50000'; i++) await new Promise(r => setTimeout(r, 100))
+  const r = await s.post({ address: TB1(6) })
+  assert.equal(r.status, 429)
+  assert.equal(r.body.reason, 'interval')
+  assert.match(r.body.error, /still waiting for its block/)
+  assert.doesNotMatch(r.body.error, /insufficient fee/)
+})
+
 test('a drip never overlaps the status check: the node runs one scan at a time', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'faucet-server-'))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))

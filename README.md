@@ -125,7 +125,8 @@ covenant (below), which goes to transparent addresses only: a `tsqb1` address
 gets a `400`, and a request made before the reserve's next interval a `429`
 with `reason: "interval"` and, when the drip tool says how long is left,
 `retry_after` in seconds; the error says when to try again. The interval is
-the covenant's, so it is shared by everyone who claims tSEQ.
+the covenant's, so it is shared by everyone who claims tSEQ. A request made while the previous drip still waits for its block meets that
+drip in the mempool; it gets the same `429` (`reason: "interval"`), not an error.
 
 ### Asking for a leaf
 

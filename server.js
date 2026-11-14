@@ -156,6 +156,19 @@ function dripTooEarly (why) {
   return out
 }
 
+// The node refuses a drip that spends a reserve the previous drip already
+// spent and that has not confirmed yet: the drip tool reads the confirmed
+// reserve, so a second request in the same minute rebuilds a spend of it and
+// meets the first one in the mempool. That is the same wait as the interval,
+// counted from the next block, not a failure of the faucet.
+const DRIP_PENDING = /refuses the drip: .*(insufficient fee|txn-mempool-conflict|missingorspent|missing-inputs)/i
+function dripPending () {
+  return {
+    reason: 'interval',
+    error: 'The faucet pays tSEQ from its reserve once per interval, for everyone, and the last payment is still waiting for its block. Try again in about ten minutes.'
+  }
+}
+
 // What a refusal says, by the key that was paid before.
 function refusal (unit, hit, now = Date.now()) {
   const kind = hit.key[0]
@@ -389,6 +402,7 @@ function payFromCovenant (req, res, address, claim) {
     const why = String(stderr || (err && err.message) || '').trim().split('\n').pop()
     if (err) claim.release()
     if (err && err.code === DRIP_TOO_EARLY) return res.status(429).json(dripTooEarly(why))
+    if (err && DRIP_PENDING.test(why)) return res.status(429).json(dripPending())
     if (err) return res.status(502).json({ error: why || 'faucet drip failed' })
     let r
     // The drip went out whatever its answer says, so the claim is kept.
