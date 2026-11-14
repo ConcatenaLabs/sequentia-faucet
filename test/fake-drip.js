@@ -30,6 +30,11 @@ if (command === 'status') {
   process.stdout.write(JSON.stringify({ tier_now: 5000000000000, reserves: [] }) + '\n')
 } else if (command === 'drip') {
   scan()
+  // FAKE_DRIP_PENDING: the previous drip is in the mempool, unconfirmed.
+  if (process.env.FAKE_DRIP_PENDING) {
+    process.stderr.write('faucet-drip: the node refuses the drip: "insufficient fee"\n')
+    process.exit(1)
+  }
   if (fs.existsSync(state) && !process.env.FAKE_DRIP_EVERY_TIME) {
     process.stderr.write('faucet-drip: the interval has not passed: the reserve can drip in 400 seconds\n')
     process.exit(3)
