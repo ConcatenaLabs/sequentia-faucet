@@ -112,6 +112,9 @@ test('the drip covenant pays tSEQ, once per interval, to transparent addresses',
   const early = await s.post({ address: TB1(4) })
   assert.equal(early.status, 429)
   assert.match(early.body.error, /once per interval/)
+  // It says when, as the drip tool does: 400 seconds is 7 minutes.
+  assert.match(early.body.error, /Try again in 7 minutes\./)
+  assert.equal(early.body.retry_after, 400)
   // The covenant pays explicit outputs only.
   const blinded = await s.post({ address: 'tsqb1q' + 'q'.repeat(60) })
   assert.equal(blinded.status, 400)

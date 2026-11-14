@@ -127,6 +127,14 @@ test('a send that finds Bark\'s wallet held by another process is tried again', 
   assert.equal(s.commands().filter(c => c[0] === 'bitcoin' && c[2] === 'send').length, 3)
 })
 
+test('a faucet whose Ark coins expired says so, without the operator\'s error', async t => {
+  const s = await start(t, { FAKE_BARK_EXPIRED: '1' })
+  const r = await s.post({ address: ADDR, asset: 'BTC' })
+  assert.equal(r.status, 503)
+  assert.match(r.body.error, /coins need renewing/)
+  assert.doesNotMatch(r.body.error, /vtxo|invalid argument/i)
+})
+
 test('the leaf wallet reads its balance without running Bark', () => {
   assert.match(require('node:fs').readFileSync(path.join(ROOT, 'leaves.js'), 'utf8'), /run\(\['balance', '--without-bitcoin'\]\)/)
 })

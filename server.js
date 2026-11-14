@@ -141,6 +141,21 @@ function waitWords (ms) {
   return `in ${m} minute${m === 1 ? '' : 's'}`
 }
 
+// The refusal of a drip asked for before the reserve's interval passed. The
+// interval is the covenant's, shared by everyone who claims, and the drip tool
+// says how long is left; a tester told "a few minutes" retries blind.
+function dripTooEarly (why) {
+  const m = /can drip in (\d+) seconds/.exec(String(why || ''))
+  const secs = m ? Number(m[1]) : 0
+  const when = secs > 0 ? waitWords(secs * 1000) : 'in a few minutes'
+  const out = {
+    reason: 'interval',
+    error: `The faucet pays tSEQ from its reserve once per interval, for everyone, and someone was paid a moment ago. Try again ${when}.`
+  }
+  if (secs > 0) out.retry_after = secs
+  return out
+}
+
 // What a refusal says, by the key that was paid before.
 function refusal (unit, hit, now = Date.now()) {
   const kind = hit.key[0]
@@ -373,8 +388,7 @@ function payFromCovenant (req, res, address, claim) {
     dripping = false
     const why = String(stderr || (err && err.message) || '').trim().split('\n').pop()
     if (err) claim.release()
-    if (err && err.code === DRIP_TOO_EARLY)
-      return res.status(429).json({ error: 'The faucet pays tSEQ from its reserve once per interval; please try again in a few minutes.' })
+    if (err && err.code === DRIP_TOO_EARLY) return res.status(429).json(dripTooEarly(why))
     if (err) return res.status(502).json({ error: why || 'faucet drip failed' })
     let r
     // The drip went out whatever its answer says, so the claim is kept.

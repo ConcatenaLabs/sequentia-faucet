@@ -82,6 +82,11 @@ if (command === 'bitcoin') {
     const sats = Number(String(amount).replace(/ sats$/, ''))
     if (!(sats > 0)) { process.stderr.write('bad amount ' + amount + '\n'); process.exit(1) }
     if (sats > state.bark) { process.stderr.write('Error: Insufficient money available\n'); process.exit(1) }
+    // FAKE_BARK_EXPIRED: the wallet's coins are past their Ark expiry, as the operator answers.
+    if (process.env.FAKE_BARK_EXPIRED) {
+      process.stderr.write("Error: code: 'Client specified an invalid argument', message: \"bad user input: vtxo " + 'ab'.repeat(32) + ':0 expired at height 160402 (tip = 161130)\"\n')
+      process.exit(1)
+    }
     state.bark -= sats
     save()
     out(dest.startsWith('tark1') ? { amount_sat: sats } : { txid: 'c'.repeat(64) })
