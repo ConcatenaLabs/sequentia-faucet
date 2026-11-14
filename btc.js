@@ -100,6 +100,12 @@ function init ({ arca, datadir, refreshMs = 60000, lockRetries = 5, lockWaitMs =
         if (r.err) {
           const m = String(why(r))
           if (/insufficient|not enough|balance/i.test(m)) throw refuse(503, 'The faucet has no BTC to hand out right now; please try again in an hour.')
+          // A coin of the faucet's own past its Ark expiry: the operator's
+          // business, not the tester's. Say so plainly and log the detail.
+          if (/expired/i.test(m)) {
+            log.error(`btc: a VTXO of the faucet's wallet has expired; exit or renew it: ${m}`)
+            throw refuse(503, 'The faucet cannot pay BTC right now: its own Bitcoin ark coins need renewing. Please try again later.')
+          }
           throw refuse(502, m)
         }
         state.sats = Math.max(0, state.sats - sats)
