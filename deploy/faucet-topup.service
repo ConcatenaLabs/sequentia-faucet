@@ -1,0 +1,16 @@
+[Unit]
+# Runs deploy/faucet-topup.sh: an asset whose leaf wallet holds few payouts is funded on the chain
+# from the wallet the faucet pays from, within the script's daily bounds.
+Description=Sequentia faucet: leaf wallet top-up
+Documentation=https://github.com/ConcatenaLabs/sequentia-faucet
+After=network-online.target sequentia-faucet.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=300
+ExecStart=/root/sequentia/sequentia-faucet/deploy/faucet-topup.sh
+Environment=FAUCET_URL=http://127.0.0.1:9960
+# One file a send, by day and asset: what the daily bound counts.
+StateDirectory=sequentia-faucet-topup
+NoNewPrivileges=true
+PrivateTmp=true

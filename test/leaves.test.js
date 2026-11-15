@@ -316,6 +316,8 @@ test('an asset under FAUCET_LEAF_WARN payouts is said low once, before it runs o
   // USDX holds nothing: low, said once however often it is read.
   let l = await s.get('/leaves')
   assert.equal(l.warn, 8)
+  // One payout's amount comes with the counts: what deploy/faucet-topup.sh turns them back into coins with.
+  assert.equal(l.assets.USDX.payout, '500000')
   const { leaves, boarding, onchain, low } = l.assets.USDX
   assert.deepEqual({ leaves, boarding, onchain, low }, { leaves: 0, boarding: 0, onchain: 0, low: true })
   assert.equal((s.log().match(/leaf wallet: USDX runs low: 0 payout\(s\) in leaves, 0 boarding, 0 more on chain \(warned under 8\)/g) || []).length, 1)
