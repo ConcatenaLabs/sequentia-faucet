@@ -399,14 +399,14 @@ on-chain coins, which are sent to it like to any address (`arca address`).
   board, at nine tenths). Under `FAUCET_LEAF_WARN` of them the log says once
   `leaf wallet: <ASSET> runs low: …; fund <datadir> on-chain before it runs
   out`, and again when it holds enough. A coin given up in a refresh counts as
-  in leaves. `GET /leaves` answers the same counts, with the operator's depth
-  limit and, as last read, each asset's coins (value, depth and state),
-  whether some wait for a round, and whether a payout of it would go out as a
-  leaf now:
+  in leaves. `GET /leaves` answers the same counts, with one payout's amount,
+  the operator's depth limit and, as last read, each asset's coins (value,
+  depth and state), whether some wait for a round, and whether a payout of it
+  would go out as a leaf now:
 
   ```json
   { "warn": 8, "depth_limit": 5, "assets": { "USDX": { "leaves": 2, "boarding": 0, "onchain": 17, "low": false,
-    "coins": [{ "value": "1000", "hops": 1, "state": "live" }], "settling": false, "leaf_now": true } } }
+    "payout": "500000", "coins": [{ "value": "1000", "hops": 1, "state": "live" }], "settling": false, "leaf_now": true } } }
   ```
 
   `deploy/faucet-check.sh`, run every 15 minutes by `faucet-check.timer`,
@@ -415,6 +415,19 @@ on-chain coins, which are sent to it like to any address (`arca address`).
   An asset that runs out is paid on the chain instead, after a block rather
   than in seconds, so funding it early keeps the receive card's "in seconds"
   true.
+- **Funded by itself**: `deploy/faucet-topup.sh`, run every 15 minutes by
+  `faucet-topup.timer`, reads `/leaves` and sends an asset that holds fewer
+  than `TOPUP_AT` payouts (12) what brings it to `TOPUP_TO` (30), on the
+  chain, to the leaf wallet's own address, from `FAUCET_WALLET`: the wallet
+  the faucet already pays from, read from the faucet's unit and never chosen
+  by the script. The faucet then boards the coins as above. Its bounds: one
+  send is at most half of what the source holds of the asset, in whole
+  payouts; an asset is sent at most `TOPUP_DAILY` times (3) a UTC day and
+  not again within `TOPUP_GAP_MIN` minutes (45) of its last send; tSEQ is
+  never sent, since the drip covenant pays it. Each send is one line in the
+  unit's journal and one file in its state directory. An asset a bound
+  leaves short is said in the journal, and the check above is what fails on
+  it: that is the moment the source wallet itself needs funding.
 
 Setting it up on the operator's chain:
 
@@ -443,7 +456,9 @@ covenant's path with a stand-in for the tool, and the leaf path with a
 stand-in for `arca` (`test/fake-arca.js`), so no coins move; the drip tool's
 stand-in refuses a second scan while one is running, as the node does, and
 the `arca` stand-in keeps each coin's depth and refuses as the operator does
-past its depth limit. With a built tool
+past its depth limit; the leaf wallet's top-up runs against stand-ins for the
+faucet, the node and the leaf wallet (`test/topup.test.js`: what it sends,
+from which wallet, and each bound). With a built tool
 it also checks `key --new`, and with a built node it runs the tool against a
 local `elementsregtest` chain:
 
@@ -458,7 +473,8 @@ every pull request and on `main`; the local-chain test needs a node and is not r
 ## Deploy
 
 `deploy/sequentia-faucet.service` is the systemd unit; `deploy/faucet-check.service`
-and `deploy/faucet-check.timer` run the payouts-left check (above). The box pulls this repo
+and `deploy/faucet-check.timer` run the payouts-left check, and `deploy/faucet-topup.service`
+and `deploy/faucet-topup.timer` the leaf wallet's top-up (both above). The box pulls this repo
 from GitHub and runs it there; source is never edited on the server. The claims
 ledger lives outside the checkout, so a deploy never touches it; keep it in
 the box's backups.

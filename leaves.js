@@ -469,6 +469,7 @@ function init (cfg) {
   }
 
   // What each asset holds, in payouts, as last read, and the level that counts as low.
+  // With one payout's amount (`payout`), so a count can be turned back into coins.
   // With each asset's coins: their value, depth and state, whether some wait
   // for a round, and whether a payout would go out as a leaf now.
   const holdings = () => {
@@ -480,7 +481,7 @@ function init (cfg) {
       let pay = null
       try { pay = BigInt(toAtoms(amountFor(label))) } catch (e) {}
       const leafNow = !!(p && pay !== null && state.ready && state.served.has(id) && p.live >= pay + pay / 100n)
-      out[label] = { ...(c || {}), ...(p ? { coins: p.coins.map(({ value, hops, state }) => ({ value: toCoins(value), hops, state })), settling: p.settling, leaf_now: leafNow } : {}) }
+      out[label] = { ...(c || {}), ...(pay !== null ? { payout: toCoins(pay) } : {}), ...(p ? { coins: p.coins.map(({ value, hops, state }) => ({ value: toCoins(value), hops, state })), settling: p.settling, leaf_now: leafNow } : {}) }
     }
     return { warn, depth_limit: state.depthLimit, assets: out }
   }
